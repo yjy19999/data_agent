@@ -41,6 +41,7 @@ def test_spawn_agent_inherits_parent_sandbox_context(tmp_path):
     assert kwargs["registry"] is not sandbox
     assert kwargs["registry"].workspace == Path(tmp_path).resolve()
     assert "agent_id=child123" in result
+    assert "wait_for_agents(agent_ids=[\"child123\"])" in result
 
 
 def test_send_input_restart_reuses_stored_registry_and_config(tmp_path):

@@ -4,7 +4,7 @@ Multi-agent tools for cc_refine_1.3.
 Mirrors codex-rs's five core multi-agent tools:
   spawn_agent   – launch a named background agent
   send_input    – send a message to a running/completed agent
-  wait          – block until agents finish and collect results
+  wait_for_agents – block until agents finish and collect results
   close_agent   – signal an agent to stop
   resume_agent  – spawn an agent that resumes a saved session
 
@@ -48,7 +48,7 @@ class SpawnAgentTool(Tool):
     description = (
         "Spawn a new background agent to handle an isolated task. "
         "The agent runs concurrently in a separate thread. "
-        "Returns an agent_id — use wait() to collect the result. "
+        "Returns an agent_id — use wait_for_agents() to collect the result. "
         "Roles: default (general), explorer (read-only/fast), "
         "worker (full tools/implementation), awaiter (long-running monitor)."
     )
@@ -100,7 +100,7 @@ class SpawnAgentTool(Tool):
             nick = entry.nickname if entry else nickname or role
             return (
                 f"[spawned] agent_id={agent_id} nickname={nick} role={role}\n"
-                f"Use wait([\"{agent_id}\"]) to block until it finishes."
+                f"Use wait_for_agents(agent_ids=[\"{agent_id}\"]) to block until it finishes."
             )
         except RuntimeError as exc:
             return f"[error] {exc}"
@@ -223,7 +223,7 @@ class ResumeAgentTool(Tool):
         "Spawn a new agent that resumes a previously saved session. "
         "The agent loads the full conversation history from the session file "
         "and continues from where it left off. "
-        "Returns an agent_id — use wait() to collect the result."
+        "Returns an agent_id — use wait_for_agents() to collect the result."
     )
 
     @property
@@ -279,7 +279,7 @@ class ResumeAgentTool(Tool):
             return (
                 f"[resumed] agent_id={agent_id} nickname={nick} "
                 f"from session={session_id}\n"
-                f"Use wait([\"{agent_id}\"]) to block until it finishes."
+                f"Use wait_for_agents(agent_ids=[\"{agent_id}\"]) to block until it finishes."
             )
         except Exception as exc:
             return f"[error] {exc}"
