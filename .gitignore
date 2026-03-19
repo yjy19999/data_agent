@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.venv/
+.pytest_cache/
+.DS_Store
+.env
+agent_bak/
+cli_bak/
+api_logs/
+.claude/
+.gemini/
+.vscode/
