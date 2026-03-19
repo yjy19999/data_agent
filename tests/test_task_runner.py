@@ -253,6 +253,38 @@ class TestRunStream:
         assert result.status == "failed"
         assert result.iterations == 3
 
+    def test_review_failure_overrides_passed_tests(self, tmp_path):
+        """A final failed review must not leak out as status='passed'."""
+        runner = self._make_runner(
+            tmp_path,
+            [
+                make_response("Task intake."),
+                make_response("Repo."),
+                make_response("Plan."),
+                make_response("Code."),
+                make_response("Tests."),
+                make_response("Review failed."),
+                make_response("Tests rewrite."),
+                make_response("Review failed again."),
+                make_response("Docs."),
+            ],
+            test_results=[
+                (True, "1 passed"),
+                (True, "1 passed"),
+            ],
+        )
+
+        review_states = iter([False, False])
+        runner._check_review_verdict = lambda: next(review_states)
+
+        events = list(runner.run_stream("build X"))
+        result = next(e.data for e in events if e.type == "result")
+        review_events = [e for e in events if e.type == "review_result"]
+
+        assert result.status == "failed"
+        assert len(review_events) == 2
+        assert all(event.data["passed"] is False for event in review_events)
+
     def test_test_result_events_emitted(self, tmp_path):
         """test_result events contain pass/fail info and output."""
         runner = self._make_runner(

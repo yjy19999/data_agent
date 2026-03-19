@@ -14,6 +14,7 @@ from .compression import CompressionService, CompressionStatus, hard_truncate_to
 from .config import Config, build_system_prompt
 from .logger import APILogger, create_logger
 from .memory_log import MemoryLogger
+from .multi_agent import agent_execution_context
 from .session import SessionRecordingService, ConversationRecord
 from .telemetry import SessionMetrics, TokenUsageStats
 from .tools import ToolRegistry, WritePlanTool, default_registry
@@ -92,8 +93,12 @@ class Agent:
         config: Config | None = None,
         registry: ToolRegistry | None = None,
         session_id: str | None = None,
+        agent_id: str | None = None,
+        agent_depth: int = 0,
     ):
         self.config = config or Config()
+        self.agent_id = agent_id
+        self.agent_depth = agent_depth
 
         if registry is not None:
             self.registry = registry
@@ -426,7 +431,13 @@ class Agent:
             for tc in tool_calls:
                 yield TurnEvent(type="tool_start", data={"name": tc.name, "arguments": tc.arguments})
                 tool_start_time = time.time()
-                result = registry.execute(tc.name, tc.arguments)
+                with agent_execution_context(
+                    config=self.config,
+                    registry=registry,
+                    agent_id=self.agent_id,
+                    depth=self.agent_depth,
+                ):
+                    result = registry.execute(tc.name, tc.arguments)
                 tool_duration_ms = (time.time() - tool_start_time) * 1000
                 success = not result.startswith("[error]") if isinstance(result, str) else True
                 self.metrics.add_tool_call(tc.name, success, tool_duration_ms)

@@ -12,13 +12,15 @@ import queue
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .agent import Agent
     from .config import Config
+    from .tools.base import ToolRegistry
 
 
 # ── Enums ──────────────────────────────────────────────────────────────────────
@@ -43,6 +45,85 @@ class AgentRole(str, Enum):
     EXPLORER = "explorer"
     WORKER   = "worker"
     AWAITER  = "awaiter"
+
+
+@dataclass(frozen=True)
+class AgentExecutionContext:
+    """Thread-local context for tool calls made by a running agent."""
+    config: Config
+    registry: ToolRegistry | None
+    agent_id: str | None = None
+    depth: int = 0
+
+
+_EXECUTION_CONTEXT = threading.local()
+
+
+@contextmanager
+def agent_execution_context(
+    *,
+    config: Config,
+    registry: ToolRegistry | None,
+    agent_id: str | None = None,
+    depth: int = 0,
+):
+    """Expose the currently executing agent context to tools on this thread."""
+    previous = getattr(_EXECUTION_CONTEXT, "current", None)
+    _EXECUTION_CONTEXT.current = AgentExecutionContext(
+        config=config,
+        registry=registry,
+        agent_id=agent_id,
+        depth=depth,
+    )
+    try:
+        yield
+    finally:
+        if previous is None:
+            try:
+                delattr(_EXECUTION_CONTEXT, "current")
+            except AttributeError:
+                pass
+        else:
+            _EXECUTION_CONTEXT.current = previous
+
+
+def get_current_execution_context() -> AgentExecutionContext | None:
+    """Return the active agent execution context for this thread, if any."""
+    return getattr(_EXECUTION_CONTEXT, "current", None)
+
+
+def clone_registry_for_child(config: Config, registry: ToolRegistry | None) -> ToolRegistry | None:
+    """
+    Build a child-safe registry from the parent's current registry.
+
+    Sandboxed registries get rebuilt against the same workspace so sub-agents
+    cannot silently fall back to an unrestricted default registry.
+    """
+    if registry is None:
+        return None
+
+    from .sandbox import SandboxedRegistry
+    from .tools.base import ToolRegistry as BaseToolRegistry
+    from .tools.profiles import get_profile, infer_profile
+
+    if isinstance(registry, SandboxedRegistry):
+        profile_name = config.tool_profile
+        if profile_name == "auto":
+            profile_name = infer_profile(config.model)
+        base_registry = get_profile(profile_name).build_registry()
+        child_registry = SandboxedRegistry(registry.workspace)
+        for schema in base_registry.schemas():
+            tool = base_registry.get(schema["function"]["name"])
+            if tool:
+                child_registry.register(tool)
+        return child_registry
+
+    child_registry = BaseToolRegistry()
+    for schema in registry.schemas():
+        tool = registry.get(schema["function"]["name"])
+        if tool:
+            child_registry.register(tool)
+    return child_registry
 
 
 # ── Role → config overrides ────────────────────────────────────────────────────
@@ -85,6 +166,8 @@ class AgentEntry:
     # Results
     result:  str | None = None
     error:   str | None = None
+    config:  Config | None = field(default=None, repr=False)
+    registry: Any = field(default=None, repr=False)
 
     # Threading primitives
     _thread:      threading.Thread | None = field(default=None, repr=False)
@@ -172,6 +255,8 @@ class AgentManager:
             self._agents[agent_id] = entry
 
         cfg = config or _Config()
+        entry.config = cfg.model_copy()
+        entry.registry = registry
         t = threading.Thread(
             target=self._run,
             args=(entry, prompt, cfg, registry),
@@ -210,9 +295,10 @@ class AgentManager:
             entry.result = None
             entry.error  = None
             from .config import Config as _Config
+            cfg = entry.config.model_copy() if entry.config is not None else _Config()
             t = threading.Thread(
                 target=self._run,
-                args=(entry, continuation, _Config(), None),
+                args=(entry, continuation, cfg, entry.registry),
                 daemon=True,
                 name=f"agent-{entry.nickname}-cont",
             )
@@ -275,6 +361,8 @@ class AgentManager:
         nickname: str | None = None,
         depth:  int = 0,
         config: Config | None = None,
+        registry=None,
+        parent_id: str | None = None,
     ) -> str:
         """
         Spawn an agent that resumes a previously saved session.
@@ -288,7 +376,19 @@ class AgentManager:
             from .agent import Agent
             entry.status = AgentStatus.RUNNING
             try:
-                agent = Agent(config=cfg)
+                if entry.registry is not None:
+                    agent = Agent(
+                        config=cfg,
+                        registry=entry.registry,
+                        agent_id=entry.agent_id,
+                        agent_depth=entry.depth,
+                    )
+                else:
+                    agent = Agent(
+                        config=cfg,
+                        agent_id=entry.agent_id,
+                        agent_depth=entry.depth,
+                    )
                 record = agent.resume_session(session_id)
                 if record is None:
                     entry.error = f"session '{session_id}' not found"
@@ -324,8 +424,10 @@ class AgentManager:
                 role=role_str,
                 status=AgentStatus.PENDING,
                 depth=depth,
-                parent_id=None,
+                parent_id=parent_id,
             )
+            entry.config = cfg.model_copy()
+            entry.registry = registry
             self._agents[agent_id] = entry
 
         t = threading.Thread(
@@ -401,7 +503,12 @@ class AgentManager:
             depth_cap = max(5, cfg.max_tool_iterations - entry.depth * 3)
             cfg.max_tool_iterations = min(cfg.max_tool_iterations, depth_cap)
 
-            agent = Agent(config=cfg, registry=registry)
+            agent = Agent(
+                config=cfg,
+                registry=registry,
+                agent_id=entry.agent_id,
+                agent_depth=entry.depth,
+            )
 
             parts: list[str] = []
 

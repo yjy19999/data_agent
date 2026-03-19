@@ -409,6 +409,7 @@ class CodingTaskRunner:
         for event in agent.run(_WRITE_CODE_PROMPT):
             yield event
 
+        review_passed = False
         for review_round in range(1, self.max_review_iterations + 1):
             # Phase 4: Write tests
             yield TurnEvent(type="phase", data="write_tests")
@@ -463,6 +464,9 @@ class CodingTaskRunner:
                 break
             # Review failed — loop back to write_tests
         # end review loop
+
+        if not review_passed:
+            result.status = "failed"
 
         # Phase 7: Write documentation
         yield TurnEvent(type="phase", data="write_docs")

@@ -23,6 +23,24 @@ def _mgr():
     return get_manager()
 
 
+def _inherit_parent_context() -> dict:
+    """Carry the current agent's config/registry into spawned children."""
+    from ..multi_agent import clone_registry_for_child, get_current_execution_context
+
+    context = get_current_execution_context()
+    if context is None:
+        return {}
+
+    kwargs = {
+        "config": context.config.model_copy(),
+        "registry": clone_registry_for_child(context.config, context.registry),
+        "depth": context.depth + 1,
+    }
+    if context.agent_id is not None:
+        kwargs["parent_id"] = context.agent_id
+    return kwargs
+
+
 # ── spawn_agent ────────────────────────────────────────────────────────────────
 
 class SpawnAgentTool(Tool):
@@ -76,6 +94,7 @@ class SpawnAgentTool(Tool):
                 prompt=prompt,
                 role=role,
                 nickname=nickname,
+                **_inherit_parent_context(),
             )
             entry = _mgr().get_entry(agent_id)
             nick = entry.nickname if entry else nickname or role
@@ -253,6 +272,7 @@ class ResumeAgentTool(Tool):
                 prompt=prompt,
                 role=role,
                 nickname=nickname,
+                **_inherit_parent_context(),
             )
             entry = _mgr().get_entry(agent_id)
             nick = entry.nickname if entry else nickname or role
