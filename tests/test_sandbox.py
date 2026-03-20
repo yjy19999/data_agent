@@ -74,6 +74,16 @@ class FakeFilePathTool(Tool):
         return f"[read] {filePath}"
 
 
+class FakeNotebookTool(Tool):
+    name = "NotebookRead"
+    description = "Read a notebook."
+    last_notebook_path: str | None = None
+
+    def run(self, notebook_path: str) -> str:
+        self.last_notebook_path = notebook_path
+        return f"[notebook] {notebook_path}"
+
+
 class FakeListDirTool(Tool):
     name = "list_dir"
     description = "List dir."
@@ -168,6 +178,12 @@ class TestPathRewriting:
         sandbox.execute("read", {"filePath": "hello.py"})
         assert tool.last_file_path == str((tmp_path / "hello.py").resolve())
 
+    def test_notebook_path_rewritten(self, tmp_path):
+        tool = FakeNotebookTool()
+        sandbox = make_sandbox(tmp_path, [tool])
+        sandbox.execute("NotebookRead", {"notebook_path": "notes.ipynb"})
+        assert tool.last_notebook_path == str((tmp_path / "notes.ipynb").resolve())
+
     def test_escape_blocked(self, tmp_path):
         tool = FakeReadTool()
         sandbox = make_sandbox(tmp_path, [tool])
@@ -182,6 +198,14 @@ class TestPathRewriting:
         result = sandbox.execute("write_file", {"path": "../../evil.py", "content": "x"})
         assert "[error]" in result
         assert tool.last_path is None
+
+    def test_notebook_path_escape_blocked(self, tmp_path):
+        tool = FakeNotebookTool()
+        sandbox = make_sandbox(tmp_path, [tool])
+        result = sandbox.execute("NotebookRead", {"notebook_path": "/tmp/escape.ipynb"})
+        assert "[error]" in result
+        assert "escapes sandbox" in result
+        assert tool.last_notebook_path is None
 
 
 # ---------------------------------------------------------------------------

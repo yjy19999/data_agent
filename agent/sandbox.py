@@ -18,6 +18,7 @@ _SINGLE_PATH_PARAMS = {
     "file_path",
     "filePath",
     "absolute_path",
+    "notebook_path",
     "directory",
     "dir_path",
     "workdir",
