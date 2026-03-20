@@ -99,6 +99,17 @@ Configuration is loaded from a `.env` file in the project root:
 python run.py
 ```
 
+### Data Quality Workflow
+
+```bash
+python quality_run.py data/sample.json
+python quality_run.py data_dir/ --focus "Prioritize safety and trajectory usefulness"
+```
+
+This stages the inputs into a sandboxed workspace, writes `InputManifest.json`,
+runs schema-family analysis, produces `QualityReport.json` / `QualityReport.md`,
+and finishes with `GateDecision.md`.
+
 ### Programmatic Usage
 
 ```python
