@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Iterator
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, call
 
 import pytest
 
@@ -408,3 +408,228 @@ class TestCustomTools:
         assert schema["function"]["name"] == "echo"
         assert "message" in schema["function"]["parameters"]["properties"]
         assert "message" in schema["function"]["parameters"]["required"]
+
+
+# ---------------------------------------------------------------------------
+# Sub-agent interface
+# ---------------------------------------------------------------------------
+
+def make_fake_manager():
+    """Return a MagicMock that looks like an AgentManager."""
+    from agent.multi_agent import AgentEntry, AgentStatus
+    mgr = MagicMock()
+    mgr.spawn.return_value = "abc123"
+    mgr.send_input.return_value = "[ok] queued input for worker-1 (abc123)"
+    mgr.wait.return_value = {"abc123": "done"}
+    mgr.close.return_value = "[ok] stop signal sent to 'worker-1' (abc123)"
+    mgr.resume.return_value = "def456"
+    mgr.get_entry.return_value = AgentEntry(
+        agent_id="abc123",
+        nickname="default-1",
+        role="default",
+        status=AgentStatus.COMPLETED,
+        depth=0,
+        parent_id=None,
+        result="result text",
+    )
+    mgr.list_agents.return_value = [
+        AgentEntry(
+            agent_id="abc123",
+            nickname="default-1",
+            role="default",
+            status=AgentStatus.COMPLETED,
+            depth=0,
+            parent_id=None,
+        )
+    ]
+    return mgr
+
+
+class TestSubAgentAPI:
+    """Tests for the 7 new sub-agent methods on AgentAPI."""
+
+    # ------------------------------------------------------------------ spawn
+
+    def test_spawn_agent_returns_agent_id(self):
+        api = make_api([])
+        mgr = make_fake_manager()
+        with patch("agent.api.get_manager", return_value=mgr):
+            result = api.spawn_agent("do something")
+        assert result == "abc123"
+        mgr.spawn.assert_called_once_with(
+            prompt="do something",
+            role="default",
+            nickname=None,
+            config=api.config,
+        )
+
+    def test_spawn_agent_passes_role_and_nickname(self):
+        api = make_api([])
+        mgr = make_fake_manager()
+        with patch("agent.api.get_manager", return_value=mgr):
+            result = api.spawn_agent("explore", role="explorer", nickname="scout")
+        assert result == "abc123"
+        mgr.spawn.assert_called_once_with(
+            prompt="explore",
+            role="explorer",
+            nickname="scout",
+            config=api.config,
+        )
+
+    def test_spawn_agent_inherits_parent_config(self):
+        api = make_api([])
+        mgr = make_fake_manager()
+        with patch("agent.api.get_manager", return_value=mgr):
+            api.spawn_agent("task")
+        _, kwargs = mgr.spawn.call_args
+        assert kwargs["config"].model == "test-model"
+
+    # ------------------------------------------------------------------ wait
+
+    def test_wait_for_agents_returns_results(self):
+        api = make_api([])
+        mgr = make_fake_manager()
+        with patch("agent.api.get_manager", return_value=mgr):
+            results = api.wait_for_agents(["abc123"])
+        assert results == {"abc123": "done"}
+        mgr.wait.assert_called_once_with(["abc123"], timeout=60)
+
+    def test_wait_for_agents_custom_timeout(self):
+        api = make_api([])
+        mgr = make_fake_manager()
+        with patch("agent.api.get_manager", return_value=mgr):
+            api.wait_for_agents(["abc123"], timeout=120)
+        mgr.wait.assert_called_once_with(["abc123"], timeout=120)
+
+    def test_wait_for_multiple_agents(self):
+        api = make_api([])
+        mgr = make_fake_manager()
+        mgr.wait.return_value = {"abc123": "r1", "def456": "r2"}
+        with patch("agent.api.get_manager", return_value=mgr):
+            results = api.wait_for_agents(["abc123", "def456"])
+        assert len(results) == 2
+        mgr.wait.assert_called_once_with(["abc123", "def456"], timeout=60)
+
+    # ---------------------------------------------------------------- send_to
+
+    def test_send_to_agent_delegates(self):
+        api = make_api([])
+        mgr = make_fake_manager()
+        with patch("agent.api.get_manager", return_value=mgr):
+            result = api.send_to_agent("abc123", "follow up")
+        assert "[ok]" in result
+        mgr.send_input.assert_called_once_with("abc123", "follow up")
+
+    def test_send_to_agent_by_nickname(self):
+        api = make_api([])
+        mgr = make_fake_manager()
+        with patch("agent.api.get_manager", return_value=mgr):
+            api.send_to_agent("worker-1", "do more")
+        mgr.send_input.assert_called_once_with("worker-1", "do more")
+
+    # ----------------------------------------------------------------- close
+
+    def test_close_agent_delegates(self):
+        api = make_api([])
+        mgr = make_fake_manager()
+        with patch("agent.api.get_manager", return_value=mgr):
+            result = api.close_agent("abc123")
+        assert "[ok]" in result
+        mgr.close.assert_called_once_with("abc123")
+
+    # --------------------------------------------------------------- resume
+
+    def test_resume_agent_returns_new_agent_id(self):
+        api = make_api([])
+        mgr = make_fake_manager()
+        with patch("agent.api.get_manager", return_value=mgr):
+            result = api.resume_agent("sess-xyz")
+        assert result == "def456"
+        mgr.resume.assert_called_once_with(
+            session_id="sess-xyz",
+            prompt=None,
+            role="default",
+            nickname=None,
+            config=api.config,
+        )
+
+    def test_resume_agent_passes_all_args(self):
+        api = make_api([])
+        mgr = make_fake_manager()
+        with patch("agent.api.get_manager", return_value=mgr):
+            api.resume_agent("sess-xyz", prompt="continue", role="worker", nickname="r1")
+        mgr.resume.assert_called_once_with(
+            session_id="sess-xyz",
+            prompt="continue",
+            role="worker",
+            nickname="r1",
+            config=api.config,
+        )
+
+    # --------------------------------------------------------------- get_agent
+
+    def test_get_agent_returns_entry(self):
+        from agent.multi_agent import AgentEntry
+        api = make_api([])
+        mgr = make_fake_manager()
+        with patch("agent.api.get_manager", return_value=mgr):
+            entry = api.get_agent("abc123")
+        assert isinstance(entry, AgentEntry)
+        assert entry.agent_id == "abc123"
+        mgr.get_entry.assert_called_once_with("abc123")
+
+    def test_get_agent_returns_none_for_unknown(self):
+        api = make_api([])
+        mgr = make_fake_manager()
+        mgr.get_entry.return_value = None
+        with patch("agent.api.get_manager", return_value=mgr):
+            result = api.get_agent("no-such-id")
+        assert result is None
+
+    # -------------------------------------------------------------- list_agents
+
+    def test_list_agents_returns_entries(self):
+        from agent.multi_agent import AgentEntry
+        api = make_api([])
+        mgr = make_fake_manager()
+        with patch("agent.api.get_manager", return_value=mgr):
+            agents = api.list_agents()
+        assert isinstance(agents, list)
+        assert len(agents) == 1
+        assert isinstance(agents[0], AgentEntry)
+        mgr.list_agents.assert_called_once()
+
+    def test_list_agents_empty(self):
+        api = make_api([])
+        mgr = make_fake_manager()
+        mgr.list_agents.return_value = []
+        with patch("agent.api.get_manager", return_value=mgr):
+            agents = api.list_agents()
+        assert agents == []
+
+    # ----------------------------------------------- spawn+wait integration
+
+    def test_spawn_then_wait_full_cycle(self):
+        """Simulate the common spawn → wait pattern."""
+        api = make_api([])
+        mgr = make_fake_manager()
+        mgr.wait.return_value = {"abc123": "analysis complete"}
+        with patch("agent.api.get_manager", return_value=mgr):
+            agent_id = api.spawn_agent("analyse the repo", role="explorer")
+            results = api.wait_for_agents([agent_id])
+        assert results[agent_id] == "analysis complete"
+
+    def test_spawn_multiple_then_wait(self):
+        """Spawn two agents, collect both results."""
+        api = make_api([])
+        mgr = make_fake_manager()
+        mgr.spawn.side_effect = ["id-1", "id-2"]
+        mgr.wait.return_value = {"id-1": "r1", "id-2": "r2"}
+        with patch("agent.api.get_manager", return_value=mgr):
+            a1 = api.spawn_agent("task 1", role="worker")
+            a2 = api.spawn_agent("task 2", role="worker")
+            results = api.wait_for_agents([a1, a2], timeout=90)
+        assert results["id-1"] == "r1"
+        assert results["id-2"] == "r2"
+        assert mgr.spawn.call_count == 2
+        mgr.wait.assert_called_once_with(["id-1", "id-2"], timeout=90)

@@ -6,6 +6,7 @@ from typing import Any
 
 from .agent import Agent, TurnEvent
 from .config import Config
+from .multi_agent import get_manager
 from .tools import ToolRegistry
 
 
@@ -271,6 +272,122 @@ class AgentAPI:
     def config(self) -> Config:
         """Active Config object."""
         return self._agent.config
+
+    # ------------------------------------------------------------------
+    # Sub-agent interface
+    # ------------------------------------------------------------------
+
+    def spawn_agent(
+        self,
+        prompt: str,
+        role: str = "default",
+        nickname: str | None = None,
+    ) -> str:
+        """
+        Spawn a background sub-agent and return its agent_id immediately.
+
+        The sub-agent runs in a separate thread and inherits this agent's
+        config. Call wait_for_agents() to block until it finishes.
+
+        Args:
+            prompt: Full instructions for the sub-agent.
+            role: One of "default", "explorer", "worker", "awaiter".
+            nickname: Optional human-readable label (auto-assigned if omitted).
+
+        Returns:
+            agent_id string — pass to wait_for_agents(), send_to_agent(), etc.
+        """
+        return get_manager().spawn(
+            prompt=prompt,
+            role=role,
+            nickname=nickname,
+            config=self._agent.config,
+        )
+
+    def wait_for_agents(
+        self,
+        agent_ids: list[str],
+        timeout: int = 60,
+    ) -> dict[str, str]:
+        """
+        Block until all specified agents finish (or timeout expires).
+
+        Args:
+            agent_ids: List of agent_ids or nicknames to wait for.
+            timeout: Max seconds to wait per agent (default 60).
+
+        Returns:
+            Dict mapping agent_id → result text (or error string).
+        """
+        return get_manager().wait(agent_ids, timeout=timeout)
+
+    def send_to_agent(self, agent_id: str, message: str) -> str:
+        """
+        Send a follow-up message to a running or completed agent.
+
+        If running, the message is queued for after the current task.
+        If completed, the agent is restarted with the new message in context.
+
+        Args:
+            agent_id: The agent_id or nickname of the target agent.
+            message: The follow-up instruction to send.
+
+        Returns:
+            Status string.
+        """
+        return get_manager().send_input(agent_id, message)
+
+    def close_agent(self, agent_id: str) -> str:
+        """
+        Signal an agent to stop after its current tool call.
+
+        Args:
+            agent_id: The agent_id or nickname to stop.
+
+        Returns:
+            Status string.
+        """
+        return get_manager().close(agent_id)
+
+    def resume_agent(
+        self,
+        session_id: str,
+        prompt: str | None = None,
+        role: str = "default",
+        nickname: str | None = None,
+    ) -> str:
+        """
+        Spawn an agent that resumes a previously saved session.
+
+        Args:
+            session_id: Session ID to restore (from list_sessions()).
+            prompt: Follow-up instruction (defaults to "Continue from where you left off.").
+            role: Role for the resumed agent.
+            nickname: Optional label.
+
+        Returns:
+            agent_id of the newly spawned agent.
+        """
+        return get_manager().resume(
+            session_id=session_id,
+            prompt=prompt,
+            role=role,
+            nickname=nickname,
+            config=self._agent.config,
+        )
+
+    def get_agent(self, agent_id: str) -> Any:
+        """
+        Return the AgentEntry for the given agent_id or nickname, or None.
+
+        Args:
+            agent_id: The agent_id or nickname to look up.
+        """
+        return get_manager().get_entry(agent_id)
+
+    def list_agents(self) -> list[Any]:
+        """Return all AgentEntry objects spawned via this process."""
+        return get_manager().list_agents()
 
     def __repr__(self) -> str:
         return (
