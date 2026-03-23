@@ -143,9 +143,6 @@ def _run(args: argparse.Namespace) -> int:
     out_root = Path(args.output_root_dir) if args.output_root_dir else Path("api_logs")
     out_root.mkdir(parents=True, exist_ok=True)
 
-    # Point the agent logger at the requested output directory
-    os.environ.setdefault("AGENT_LOG_DIR", str(out_root))
-
     # --- Timeout (Unix SIGALRM) ----------------------------------------------
     _arm_timeout(args.max_execution_time)
 
@@ -156,6 +153,7 @@ def _run(args: argparse.Namespace) -> int:
             config=config,
             max_fix_iterations=args.max_iterations,
             session_id=session_id,
+            logs_dir=out_root,
         )
         result = runner.run(args.query, verbose=not args.quiet)
     finally:

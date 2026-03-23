@@ -195,6 +195,8 @@ class TestRunStream:
             ],
             test_results=[(True, "1 passed")],
         )
+        # No real Review.md is written by the mock agent — stub the verdict.
+        runner._check_review_verdict = lambda: True
         events = list(runner.run_stream("build X"))
         result_events = [e for e in events if e.type == "result"]
         assert result_events
@@ -218,9 +220,11 @@ class TestRunStream:
             ],
             test_results=[
                 (False, "FAILED test_foo - AssertionError"),  # iter 1
-                (True, "1 passed"),                            # iter 2
+                (True, "1 passed"),                           # iter 2
             ],
         )
+        # No real Review.md is written by the mock agent — stub the verdict.
+        runner._check_review_verdict = lambda: True
         events = list(runner.run_stream("build X"))
         result = next(e.data for e in events if e.type == "result")
         assert result.status == "passed"
@@ -255,24 +259,43 @@ class TestRunStream:
 
     def test_review_failure_overrides_passed_tests(self, tmp_path):
         """A final failed review must not leak out as status='passed'."""
-        runner = self._make_runner(
-            tmp_path,
-            [
-                make_response("Task intake."),
-                make_response("Repo."),
-                make_response("Plan."),
-                make_response("Code."),
-                make_response("Tests."),
-                make_response("Review failed."),
-                make_response("Tests rewrite."),
-                make_response("Review failed again."),
-                make_response("Docs."),
-            ],
-            test_results=[
-                (True, "1 passed"),
-                (True, "1 passed"),
-            ],
+        # Needs max_review_iterations=2 so both review rounds execute.
+        runner = CodingTaskRunner(
+            workspace=tmp_path,
+            config=Config(model="test", api_key="test", stream=False),
+            max_fix_iterations=3,
+            max_review_iterations=2,
         )
+        test_iter = iter([(True, "1 passed"), (True, "1 passed")])
+        runner._run_tests = lambda: next(test_iter)
+
+        original_make = runner._make_agent
+
+        def patched_make():
+            with (
+                patch("agent.agent.SessionRecordingService") as mock_rec_cls,
+                patch("agent.agent.LLMClient") as mock_client_cls,
+            ):
+                mock_rec_cls.return_value = MagicMock()
+                mock_client = MagicMock()
+                mock_client_cls.return_value = mock_client
+                mock_client.chat.side_effect = [
+                    make_response("Task intake."),       # task_intake
+                    make_response("Repo."),              # repo_recon
+                    make_response("Plan."),              # plan_design
+                    make_response("Code."),              # write_code
+                    make_response("Tests."),             # write_tests round 1
+                    make_response("Review failed."),     # review round 1
+                    make_response("Tests rewrite."),     # write_tests round 2
+                    make_response("Review failed again."),  # review round 2
+                    make_response("Docs."),              # write_docs
+                ]
+                agent = original_make()
+                agent.client = mock_client
+                agent.recorder = mock_rec_cls.return_value
+                return agent
+
+        runner._make_agent = patched_make
 
         review_states = iter([False, False])
         runner._check_review_verdict = lambda: next(review_states)
@@ -339,6 +362,8 @@ class TestRunBlocking:
             max_review_iterations=1,
         )
         runner._run_tests = lambda: (True, "1 passed")
+        # No real Review.md is written by the mock agent — stub the verdict.
+        runner._check_review_verdict = lambda: True
 
         with (
             patch("agent.agent.SessionRecordingService") as mock_rec_cls,
