@@ -19,7 +19,11 @@ dependencies = [
 ]
 
 [project.scripts]
-agent = "cli.main:main"
+agent     = "cli.main:main"
+llm-agent = "agent_cli:main"
+
+[tool.setuptools]
+py-modules = ["agent_cli"]
 
 [tool.setuptools.packages.find]
 where = ["."]
