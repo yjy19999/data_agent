@@ -7,6 +7,8 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
+from datetime import datetime
 from pathlib import Path
 
 from rich.console import Console
@@ -676,9 +678,21 @@ def _format_args(args: dict) -> str:
     return ", ".join(parts)
 
 
+OUTPUT_ROOT = Path(__file__).parent.parent / "output"
+
+
 def main() -> None:
     config = Config()
-    agent = Agent(config=config)
+
+    session_id = uuid.uuid4().hex[:12]
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_folder = OUTPUT_ROOT / f"{ts}_{session_id}"
+    logs_dir = run_folder / "trajectory"
+    memory_dir = run_folder / "memory"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    memory_dir.mkdir(parents=True, exist_ok=True)
+
+    agent = Agent(config=config, session_id=session_id, logs_dir=str(logs_dir), memory_log_dir=str(memory_dir))
     plan_mode = False
     verbose = False
 
