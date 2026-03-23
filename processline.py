@@ -55,7 +55,7 @@ def init_sandbox_env(sandbox_path):
         print(f"正在安装 Sandbox 依赖: {sandbox_path}")
         # 使用 pip install -e . 安装项目
         subprocess.run([sys.executable, "-m", "pip", "install", "-e", "."],
-                       cwd=sandbox_path, check=True)
+                       cwd=sandbox_path, check=True)
         print("Sandbox 依赖安装成功。")
     except subprocess.CalledProcessError as e:
         print(f"Sandbox 安装失败: {e}")
@@ -153,9 +153,9 @@ def process_single_item(client, item, args):
             "--llm_name", f"hosted_vllm/{args.model_name}",
             "--llm_base_url", args.base_url,
             "--api_key", args.api_key,
-            "--max_execution_time", str(args.max_execution_time),  # 转换为字符串
-            "--max_tokens_per_call", str(args.max_tokens_per_call),  # 转换为字符串
-            "--max_token_limit", str(args.max_token_limit),  # 转换为字符串
+            "--max_execution_time", str(args.max_execution_time),  # 转换为字符串
+            "--max_tokens_per_call", str(args.max_tokens_per_call),  # 转换为字符串
+            "--max_token_limit", str(args.max_token_limit),  # 转换为字符串
             "--output_root_dir", args.output_path,
             "--work_root_dir", args.work_root_dir,
         ]
@@ -207,7 +207,7 @@ def process_lines_across_files(all_files, args, task_index, total_tasks):
     with open(progress_log, 'a') as f_prog:
         with ThreadPoolExecutor(max_workers=args.max_workers) as executor:
             futures = {executor.submit(process_single_item, client, json.loads(l["content"]), args): l for l in
-                       current_tasks}
+                       current_tasks}
 
             for future in tqdm(as_completed(futures), total=len(current_tasks), desc=f"Task {task_index}"):
                 res = future.result()
