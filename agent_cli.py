@@ -132,16 +132,24 @@ def _run(args: argparse.Namespace) -> int:
     config = Config(**config_kwargs)
 
     # --- Session & workspace paths -------------------------------------------
+    # All output lives under a single run folder:
+    #   <root>/<YYYYMMDD_HHMMSS>_<session_id>/
+    #     files/       — sandboxed workspace (code written by the agent)
+    #     trajectory/  — trace files (openhands, swe-agent, etc.)
+    #     memory/      — compression / memory logs
     session_id = uuid.uuid4().hex[:12]
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_label = f"agent_{ts}_{session_id}"
+    run_label = f"{ts}_{session_id}"
 
-    work_root = Path(args.work_root_dir) if args.work_root_dir else Path("task_workspace")
-    workspace = work_root / run_label
+    output_root = Path(args.output_root_dir) if args.output_root_dir else Path("output")
+    run_folder  = output_root / run_label
+    workspace   = run_folder / "files"
+    logs_dir    = run_folder / "trajectory"
+    memory_dir  = run_folder / "memory"
+
     workspace.mkdir(parents=True, exist_ok=True)
-
-    out_root = Path(args.output_root_dir) if args.output_root_dir else Path("api_logs")
-    out_root.mkdir(parents=True, exist_ok=True)
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    memory_dir.mkdir(parents=True, exist_ok=True)
 
     # --- Timeout (Unix SIGALRM) ----------------------------------------------
     _arm_timeout(args.max_execution_time)
@@ -153,7 +161,8 @@ def _run(args: argparse.Namespace) -> int:
             config=config,
             max_fix_iterations=args.max_iterations,
             session_id=session_id,
-            logs_dir=out_root,
+            logs_dir=logs_dir,
+            memory_log_dir=memory_dir,
         )
         result = runner.run(args.query, verbose=not args.quiet)
     finally:
