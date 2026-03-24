@@ -27,9 +27,12 @@ Your job is to inspect datasets and write concise, evidence-backed reports.
 IMPORTANT RULES:
 1. Work only inside the current working directory.
 2. Prefer reading `InputManifest.json` first. Only read raw inputs when the manifest is insufficient.
-3. Every score or conclusion must cite concrete evidence from the manifest or sampled content.
-4. When you write JSON files, they must be valid JSON.
-5. Focus on these six dimensions:
+3. To sample any .json, .jsonl, .json.gz, or .jsonl.gz file, ALWAYS use the ReadData tool.
+   Never use Read or Bash/cat on those file types — ReadData handles compression and protects
+   the context window.
+4. Every score or conclusion must cite concrete evidence from the manifest or sampled content.
+5. When you write JSON files, they must be valid JSON.
+6. Focus on these six dimensions:
    - completeness
    - consistency
    - executability_or_verifiability
@@ -105,7 +108,7 @@ class _QualityProgressPrinter(ProgressPrinter):
 
 runner_registry.register(
     "quality",
-    profile="auto",
+    profile="datacheck",
     system_prompt=_QUALITY_SYSTEM_PROMPT,
     description="Data quality inspection and reporting",
 )
@@ -113,10 +116,16 @@ runner_registry.register(
 _SCHEMA_PROMPT = """\
 Read `InputManifest.json` first.
 
+IMPORTANT — sampling rule:
+- For any file ending in .json, .jsonl, .json.gz, or .jsonl.gz, use the ReadData tool
+  to sample it. Do NOT use Read or Bash/cat on these files — ReadData handles
+  compression, JSONL parsing, and context-window protection automatically.
+- For all other file types (code, text, markdown, etc.) use the Read tool as normal.
+
 Goal:
 1. Confirm the detailed data format for each input file.
 2. Decide whether each file is pure code, code sample, agent trajectory, QA, triple, webpage, or another family.
-3. For JSON / JSONL inputs, infer the schema family and key fields.
+3. For JSON / JSONL inputs, infer the schema family and key fields from the ReadData sample.
 4. Note any ambiguity, truncation risk, or places that require deeper inspection.
 
 Write two files:
@@ -134,7 +143,7 @@ Write two files:
      "files": [
        {
          "path": "input/...",
-         "kind": "json|jsonl|code|webpage|text|...",
+         "kind": "json|jsonl|json.gz|jsonl.gz|code|webpage|text|...",
          "schema_family": "agent_trajectory|code_sample|webpage|qa_pair|triple|generic_json|document|...",
          "confidence": 0.0,
          "key_fields": ["field"],
@@ -147,6 +156,9 @@ Write two files:
 
 _QUALITY_PROMPT = """\
 Use `InputManifest.json`, `Schema.md`, and `Schema.json`.
+
+If you need to re-sample any file for evidence, use ReadData for .json/.jsonl/.json.gz/.jsonl.gz
+files. Do NOT use Read or Bash/cat on those files.
 
 Assess each file and the dataset overall against these six dimensions:
 - completeness
