@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import shutil
 import uuid
 from datetime import datetime
@@ -12,40 +11,43 @@ from agent import Config
 from agent.data_quality_runner import DataQualityRunner, _DEFAULT_FOCUS
 
 
-_FORMAT_TO_PREFIX = {
-    "openhands": "trace_openhands",
-    "swe-agent": "trace_sweagent",
-    "mini-swe-agent": "trace_miniswe",
-    "both": "trace_openhands",
-    "all": "trace_openhands",
-    "none": "trace",
-}
+SAMPLE_DIR = Path(__file__).parent / "sample"
 
-WORKSPACE_ROOT = Path(__file__).parent / "quality_workspace"
+OUTPUT_ROOT = Path(__file__).parent / "output"
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run the data-quality inspection workflow")
-    parser.add_argument("inputs", nargs="+", help="Input file(s) or folder(s) to inspect")
-    parser.add_argument("--workspace", default=None, help="Workspace folder (overrides auto-naming)")
+    parser.add_argument("inputs", nargs="*", help="Input file(s) or folder(s) to inspect (defaults to all files in ./sample)")
+    parser.add_argument("--workspace", default=None, help="Override the files/ subfolder path")
     parser.add_argument("--focus", default=None, help="Optional extra inspection guidance")
-    parser.add_argument("--clean", action="store_true", help="Remove workspace before starting")
+    parser.add_argument("--clean", action="store_true", help="Remove output folder before starting")
     parser.add_argument("--model", default=None, help="Override LLM model name")
     args = parser.parse_args()
 
+    if not args.inputs:
+        if not SAMPLE_DIR.exists():
+            parser.error("No inputs given and ./sample folder does not exist")
+        args.inputs = sorted(str(p) for p in SAMPLE_DIR.iterdir() if p.is_file())
+        if not args.inputs:
+            parser.error("No inputs given and ./sample folder is empty")
+
     session_id = uuid.uuid4().hex[:12]
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_format = os.getenv("LLM_LOG_FORMAT", "openhands").strip().lower().replace("_", "-")
-    trace_prefix = _FORMAT_TO_PREFIX.get(log_format, "trace_openhands")
+    run_folder = f"{ts}_{session_id}"
 
-    if args.workspace:
-        workspace = Path(args.workspace)
-    else:
-        folder_name = f"{trace_prefix}_{ts}_{session_id}_quality_workspace"
-        workspace = WORKSPACE_ROOT / folder_name
+    output_dir = OUTPUT_ROOT / run_folder
+    workspace  = Path(args.workspace) if args.workspace else output_dir / "files"
+    logs_dir   = output_dir / "trajectory"
+    memory_dir = output_dir / "memory"
 
-    if args.clean and workspace.exists():
-        shutil.rmtree(workspace)
+    if args.clean and output_dir.exists():
+        shutil.rmtree(output_dir)
+        print(f"Cleaned output: {output_dir}")
+
+    workspace.mkdir(parents=True, exist_ok=True)
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    memory_dir.mkdir(parents=True, exist_ok=True)
 
     config = Config()
     if args.model:
@@ -60,8 +62,11 @@ def main() -> int:
             compression_threshold=config.compression_threshold,
         )
 
-    print(f"Model:     {config.model}")
-    print(f"Workspace: {workspace}")
+    print(f"Model:      {config.model}")
+    print(f"Output dir: {output_dir}")
+    print(f"  files/      → {workspace}")
+    print(f"  trajectory/ → {logs_dir}")
+    print(f"  memory/     → {memory_dir}")
     print("Inputs:")
     for item in args.inputs:
         print(f"  - {Path(item).expanduser()}")
@@ -71,6 +76,8 @@ def main() -> int:
         workspace=workspace,
         config=config,
         session_id=session_id,
+        logs_dir=logs_dir,
+        memory_log_dir=memory_dir,
     )
     result = runner.run(args.inputs, focus=args.focus or _DEFAULT_FOCUS)
 

@@ -11,6 +11,8 @@ agent_bak/
 cli_bak/
 api_logs/
 output/
+quality_workspace/
+sample/
 .claude/
 .gemini/
 .vscode/
