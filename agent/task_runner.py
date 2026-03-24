@@ -71,7 +71,7 @@ IMPORTANT RULES:
 
 runner_registry.register(
     "coding",
-    profile="auto",
+    profile="claude",
     system_prompt=_CODING_SYSTEM_PROMPT,
     description="Code generation, testing, and documentation",
 )
