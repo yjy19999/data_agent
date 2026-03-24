@@ -35,11 +35,19 @@ def parse_args():
     parser.add_argument("--base_url", type=str, default="http://127.0.0.1:8000/v1")
     parser.add_argument("--api_key", type=str, default="EMPTY")
 
-    # --- 新增：llm-agent 运行参数 ---
+    # --- llm-agent 运行参数 ---
     parser.add_argument("--max_execution_time", type=int, default=7200, help="Sandbox 最大执行时间(秒)")
     parser.add_argument("--max_tokens_per_call", type=int, default=4000, help="Sandbox 每次调用最大 token 数")
     parser.add_argument("--max_token_limit", type=int, default=120000, help="llm 最大上下文")
-    parser.add_argument("--work_root_dir", type=str, default="/home/testbed", help="临时工作目录")
+    parser.add_argument("--work_root_dir", type=str, default="/home/testbed", help="临时工作目录(保留用于兼容性)")
+
+    # --- Runner 选择 ---
+    parser.add_argument(
+        "--runner",
+        choices=["coding", "data-quality"],
+        default="coding",
+        help="Agent runner: 'coding' = CodingTaskRunner; 'data-quality' = DataQualityRunner",
+    )
 
     return parser.parse_args()
 
@@ -145,7 +153,7 @@ def process_single_item(client, item, args):
         )
         problem_content = problem_res.choices[0].message.content.strip()
 
-        # 第二阶段：调用 llm-agent (引用新增的 args 参数)
+        # 第二阶段：调用 llm-agent
         sandbox_cmd = [
             "llm-agent", "run",
             "--local",
@@ -153,11 +161,11 @@ def process_single_item(client, item, args):
             "--llm_name", f"hosted_vllm/{args.model_name}",
             "--llm_base_url", args.base_url,
             "--api_key", args.api_key,
-            "--max_execution_time", str(args.max_execution_time),  # 转换为字符串
-            "--max_tokens_per_call", str(args.max_tokens_per_call),  # 转换为字符串
-            "--max_token_limit", str(args.max_token_limit),  # 转换为字符串
+            "--max_execution_time", str(args.max_execution_time),
+            "--max_tokens_per_call", str(args.max_tokens_per_call),
+            "--max_token_limit", str(args.max_token_limit),
             "--output_root_dir", args.output_path,
-            "--work_root_dir", args.work_root_dir,
+            "--runner", args.runner,
         ]
 
         # 运行 Sandbox，使用列表形式确保 problem_content 中的特殊字符安全

@@ -9,11 +9,24 @@ this agent as a subprocess drop-in for any pipeline expecting:
         --llm_base_url http://127.0.0.1:8000/v1 --api_key EMPTY \\
         --max_execution_time 7200 --max_tokens_per_call 4000 \\
         --max_token_limit 120000 \\
-        --output_root_dir /path/to/output --work_root_dir /path/to/work
+        --output_root_dir /path/to/output --work_root_dir /path/to/work \\
+        --runner coding            # or: --runner data-quality
+
+Runner choices
+--------------
+coding       (default) CodingTaskRunner — write code, tests, docs.
+             Requires:  --query "Build a stack class"
+
+data-quality            DataQualityRunner — inspect a dataset and produce
+                        Schema.md / QualityReport.json / GateDecision.md.
+             Requires:  --data_inputs /path/to/file_or_dir [more paths ...]
+             Optional:  --query "custom focus instructions"
+                        --scan_bytes 200000
+                        --chunk_chars 4000
 
 Exit codes:
-    0  — task completed and tests passed
-    1  — task failed or tests did not pass
+    0  — task completed / dataset accepted
+    1  — task failed / dataset rejected or error
     124 — execution timed out (SIGALRM, Unix only)
 """
 from __future__ import annotations
@@ -34,20 +47,20 @@ from pathlib import Path
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="llm-agent",
-        description="LLM coding agent — processline.py compatible CLI",
+        description="LLM agent — processline.py compatible CLI",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    run_p = sub.add_parser("run", help="Run the coding agent on a single query")
+    run_p = sub.add_parser("run", help="Run the agent on a single task or dataset")
 
-    # processline.py flags (exact names preserved)
+    # ---- processline.py flags (exact names preserved) ----------------------
     run_p.add_argument(
         "--local", action="store_true",
         help="Run locally (required by processline.py; always true here)",
     )
     run_p.add_argument(
-        "--query", required=True,
-        help="Task / problem description to solve",
+        "--query", default=None,
+        help="Task description (coding runner) or focus override (data-quality runner).",
     )
     run_p.add_argument(
         "--llm_name", default=None,
@@ -74,26 +87,49 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     run_p.add_argument(
         "--max_token_limit", type=int, default=120000,
-        help="Total context window size (tokens). "
-             "Mapped to Config.context_limit.",
+        help="Total context window size (tokens). Mapped to Config.context_limit.",
     )
     run_p.add_argument(
         "--output_root_dir", default=None,
-        help="Root directory for trace files and session output. "
-             "Defaults to ./api_logs/",
+        help="Root directory for all output. Defaults to ./output/",
     )
     run_p.add_argument(
         "--work_root_dir", default=None,
-        help="Root directory for per-run workspaces. "
-             "A unique subfolder is created inside for each run. "
-             "Defaults to ./task_workspace/",
+        help="(Unused — workspace now lives inside output_root_dir/files/. "
+             "Kept for processline.py back-compat.)",
     )
 
-    # Optional convenience overrides
+    # ---- Runner selection --------------------------------------------------
+    run_p.add_argument(
+        "--runner",
+        choices=["coding", "data-quality"],
+        default="coding",
+        help="Which agent runner to use. "
+             "'coding' = CodingTaskRunner (default); "
+             "'data-quality' = DataQualityRunner.",
+    )
+
+    # ---- data-quality runner options ---------------------------------------
+    run_p.add_argument(
+        "--data_inputs", nargs="+", default=None, metavar="PATH",
+        help="[data-quality] One or more input file / directory paths to inspect.",
+    )
+    run_p.add_argument(
+        "--scan_bytes", type=int, default=200_000,
+        help="[data-quality] Bytes to scan per file when building the manifest (default 200000).",
+    )
+    run_p.add_argument(
+        "--chunk_chars", type=int, default=4_000,
+        help="[data-quality] Characters per chunk in the manifest preview (default 4000).",
+    )
+
+    # ---- coding runner options ---------------------------------------------
     run_p.add_argument(
         "--max_iterations", type=int, default=5,
-        help="Max test-fix iterations inside CodingTaskRunner (default 5)",
+        help="[coding] Max test-fix iterations inside CodingTaskRunner (default 5).",
     )
+
+    # ---- shared options ----------------------------------------------------
     run_p.add_argument(
         "--quiet", action="store_true",
         help="Suppress live progress output",
@@ -107,15 +143,22 @@ def _build_parser() -> argparse.ArgumentParser:
 # ---------------------------------------------------------------------------
 
 def _run(args: argparse.Namespace) -> int:
-    from agent import CodingTaskRunner, Config
+    from agent import CodingTaskRunner, DataQualityRunner, Config
 
-    # --- Model name ----------------------------------------------------------
-    # llm_name can be "hosted_vllm/qwen" or just "qwen"
+    # ---- validate required args per runner ---------------------------------
+    if args.runner == "coding" and not args.query:
+        print("[llm-agent] error: --runner coding requires --query", file=sys.stderr)
+        return 1
+    if args.runner == "data-quality" and not args.data_inputs:
+        print("[llm-agent] error: --runner data-quality requires --data_inputs", file=sys.stderr)
+        return 1
+
+    # ---- model name --------------------------------------------------------
     model: str | None = None
     if args.llm_name:
         model = args.llm_name.split("/")[-1]
 
-    # --- Config --------------------------------------------------------------
+    # ---- Config ------------------------------------------------------------
     config_kwargs: dict = {}
     if args.llm_base_url:
         config_kwargs["base_url"] = args.llm_base_url
@@ -126,15 +169,14 @@ def _run(args: argparse.Namespace) -> int:
     if args.max_token_limit:
         config_kwargs["context_limit"] = args.max_token_limit
     if args.max_tokens_per_call:
-        # Use as the tool-output budget inside compressed history
         config_kwargs["compression_tool_budget_tokens"] = args.max_tokens_per_call
 
     config = Config(**config_kwargs)
 
-    # --- Session & workspace paths -------------------------------------------
+    # ---- Session & output paths --------------------------------------------
     # All output lives under a single run folder:
     #   <root>/<YYYYMMDD_HHMMSS>_<session_id>/
-    #     files/       — sandboxed workspace (code written by the agent)
+    #     files/       — sandboxed workspace (code / data written by the agent)
     #     trajectory/  — trace files (openhands, swe-agent, etc.)
     #     memory/      — compression / memory logs
     session_id = uuid.uuid4().hex[:12]
@@ -142,34 +184,49 @@ def _run(args: argparse.Namespace) -> int:
     run_label = f"{ts}_{session_id}"
 
     output_root = Path(args.output_root_dir) if args.output_root_dir else Path("output")
-    run_folder  = output_root / run_label
-    workspace   = run_folder / "files"
-    logs_dir    = run_folder / "trajectory"
-    memory_dir  = run_folder / "memory"
+    run_folder = output_root / run_label
+    workspace  = run_folder / "files"
+    logs_dir   = run_folder / "trajectory"
+    memory_dir = run_folder / "memory"
 
     workspace.mkdir(parents=True, exist_ok=True)
     logs_dir.mkdir(parents=True, exist_ok=True)
     memory_dir.mkdir(parents=True, exist_ok=True)
 
-    # --- Timeout (Unix SIGALRM) ----------------------------------------------
+    # ---- Timeout -----------------------------------------------------------
     _arm_timeout(args.max_execution_time)
 
-    # --- Run -----------------------------------------------------------------
+    # ---- Dispatch to selected runner ---------------------------------------
     try:
-        runner = CodingTaskRunner(
-            workspace=workspace,
-            config=config,
-            max_fix_iterations=args.max_iterations,
-            session_id=session_id,
-            logs_dir=logs_dir,
-            memory_log_dir=memory_dir,
-        )
-        result = runner.run(args.query, verbose=not args.quiet)
+        if args.runner == "coding":
+            runner = CodingTaskRunner(
+                workspace=workspace,
+                config=config,
+                max_fix_iterations=args.max_iterations,
+                session_id=session_id,
+                logs_dir=logs_dir,
+                memory_log_dir=memory_dir,
+            )
+            result = runner.run(args.query, verbose=not args.quiet)
+            return 0 if result.status == "passed" else 1
+
+        else:  # data-quality
+            runner = DataQualityRunner(
+                workspace=workspace,
+                config=config,
+                session_id=session_id,
+                logs_dir=logs_dir,
+                memory_log_dir=memory_dir,
+                scan_bytes=args.scan_bytes,
+                chunk_chars=args.chunk_chars,
+            )
+            focus = args.query or ""
+            result = runner.run(args.data_inputs, focus=focus, verbose=not args.quiet)
+            # accept → 0, review/reject/error → 1
+            return 0 if result.status == "accept" else 1
+
     finally:
         _disarm_timeout()
-
-    # Exit 0 = passed, 1 = failed/error
-    return 0 if result.status == "passed" else 1
 
 
 # ---------------------------------------------------------------------------

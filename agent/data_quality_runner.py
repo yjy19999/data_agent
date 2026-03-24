@@ -167,6 +167,8 @@ class DataQualityRunner:
         config: Config | None = None,
         *,
         session_id: str | None = None,
+        logs_dir: str | Path | None = None,
+        memory_log_dir: str | Path | None = None,
         scan_bytes: int = 200_000,
         chunk_chars: int = 4_000,
         preview_chars: int = 800,
@@ -177,6 +179,8 @@ class DataQualityRunner:
         self.workspace.mkdir(parents=True, exist_ok=True)
         self.config = config or Config()
         self.session_id = session_id or uuid.uuid4().hex[:12]
+        self.logs_dir = Path(logs_dir) if logs_dir else None
+        self.memory_log_dir = Path(memory_log_dir) if memory_log_dir else None
         self.scan_bytes = scan_bytes
         self.chunk_chars = chunk_chars
         self.preview_chars = preview_chars
@@ -209,6 +213,8 @@ class DataQualityRunner:
             ),
             registry=sandbox,
             session_id=self.session_id,
+            logs_dir=str(self.logs_dir) if self.logs_dir else None,
+            memory_log_dir=str(self.memory_log_dir) if self.memory_log_dir else None,
         )
 
     def run(
@@ -216,10 +222,15 @@ class DataQualityRunner:
         inputs: Sequence[str | Path],
         *,
         focus: str = _DEFAULT_FOCUS,
+        verbose: bool = True,
     ) -> DataQualityResult:
         result = DataQualityResult(inputs=[str(Path(item)) for item in inputs])
         try:
             for event in self.run_stream(inputs, focus=focus):
+                if verbose and event.type == "phase":
+                    print(f"\n--- [data-quality] {event.data} ---", flush=True)
+                elif verbose and event.type == "manifest_ready":
+                    print(f"  manifest: {event.data}", flush=True)
                 if event.type == "result":
                     return event.data
         except Exception as exc:
