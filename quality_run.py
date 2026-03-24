@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+"""
+Run the DataQualityRunner against one or more data files.
+
+Usage:
+    python quality_run.py                                       # inspect ./sample/
+    python quality_run.py data/sample.json                      # single file
+    python quality_run.py data_dir/ --focus "Prioritize safety" # custom focus
+    python quality_run.py --quiet data/                         # no live output
+    python quality_run.py --model claude-opus-4-6 data/         # override model
+"""
 from __future__ import annotations
 
 import argparse
@@ -18,10 +28,14 @@ OUTPUT_ROOT = Path(__file__).parent / "output"
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run the data-quality inspection workflow")
-    parser.add_argument("inputs", nargs="*", help="Input file(s) or folder(s) to inspect (defaults to all files in ./sample)")
+    parser.add_argument(
+        "inputs", nargs="*",
+        help="Input file(s) or folder(s) to inspect (defaults to all files in ./sample)",
+    )
     parser.add_argument("--workspace", default=None, help="Override the files/ subfolder path")
     parser.add_argument("--focus", default=None, help="Optional extra inspection guidance")
     parser.add_argument("--clean", action="store_true", help="Remove output folder before starting")
+    parser.add_argument("--quiet", action="store_true", help="No live output")
     parser.add_argument("--model", default=None, help="Override LLM model name")
     args = parser.parse_args()
 
@@ -62,11 +76,14 @@ def main() -> int:
             compression_threshold=config.compression_threshold,
         )
 
+    focus = args.focus or _DEFAULT_FOCUS
+
     print(f"Model:      {config.model}")
     print(f"Output dir: {output_dir}")
     print(f"  files/      → {workspace}")
     print(f"  trajectory/ → {logs_dir}")
     print(f"  memory/     → {memory_dir}")
+    print(f"Focus:      {focus[:80]}{'...' if len(focus) > 80 else ''}")
     print("Inputs:")
     for item in args.inputs:
         print(f"  - {Path(item).expanduser()}")
@@ -79,18 +96,52 @@ def main() -> int:
         logs_dir=logs_dir,
         memory_log_dir=memory_dir,
     )
-    result = runner.run(args.inputs, focus=args.focus or _DEFAULT_FOCUS)
+    result = runner.run(args.inputs, focus=focus, verbose=not args.quiet)
 
+    # Final summary — always printed regardless of --quiet
+    print()
     print("=" * 60)
     print(f"Decision:   {result.status.upper()}")
     print(f"Manifest:   {result.manifest_file}")
-    print(f"Schema:     {result.schema_files}")
-    print(f"Reports:    {result.report_files}")
+
+    if result.schema_files:
+        print("Schema:")
+        for f in result.schema_files:
+            print(f"  {f}")
+    else:
+        print("Schema:     (none)")
+
+    if result.report_files:
+        print("Reports:")
+        for f in result.report_files:
+            print(f"  {f}")
+    else:
+        print("Reports:    (none)")
+
     if result.overall_summary:
-        print(f"Summary:    {result.overall_summary}")
+        summary = result.overall_summary
+        print(f"Summary:    {summary[:120]}{'...' if len(summary) > 120 else ''}")
+
     if result.error:
         print(f"Error:      {result.error}")
+
     print("=" * 60)
+
+    # Per-file listing with line count + byte size (mirrors task_run.py)
+    all_output_files = (
+        ([result.manifest_file] if result.manifest_file else [])
+        + result.schema_files
+        + result.report_files
+    )
+    if all_output_files:
+        print("\nOutput files:")
+        for f in all_output_files:
+            p = workspace / f
+            if p.exists():
+                size = p.stat().st_size
+                lines = p.read_text(errors="replace").count("\n") + 1
+                print(f"  {f:<40} {lines:>4} lines  {size:>6} bytes")
+
     return 0 if result.status in {"accept", "review"} else 1
 
 
