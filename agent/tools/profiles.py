@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from .base import Tool, ToolRegistry
+from .data import ReadDataTool
 from .claude import (
     BashTool, EditTool, LSTool, ReadTool, WriteTool,
     GlobTool as _ClaudeGlob,
@@ -294,6 +295,20 @@ _PROFILES: dict[str, ToolProfile] = {
             # Multi-agent (shared with claude/opencode)
             SpawnAgentTool, SendInputTool, WaitTool,
             CloseAgentTool, ResumeAgentTool, ListAgentsTool,
+        ],
+    ),
+
+    # Data quality check: minimal Claude-style set for inspecting data files
+    "datacheck": ToolProfile(
+        name="datacheck",
+        description=(
+            "Data quality check — Claude-style file tools without notebook or web. "
+            "Bash, Glob, Grep, LS, Read, Edit, Write."
+        ),
+        _factories=[
+            BashTool, _ClaudeGlob, _ClaudeGrep, LSTool,
+            ReadTool, EditTool, WriteTool,
+            ReadDataTool,
         ],
     ),
 

@@ -1,5 +1,7 @@
 from .agent import Agent, TurnEvent, AgentState
+from .agent_factory import AgentFactory
 from .api import AgentAPI
+from .runner_registry import RunnerRegistry, RunnerEntry, runner_registry
 from .compression import CompressionService, CompressionStatus, CompressionResult
 from .config import Config
 from .sandbox import SandboxedRegistry
@@ -12,7 +14,11 @@ from .tools import ToolRegistry, default_registry
 
 __all__ = [
     "Agent",
+    "AgentFactory",
     "AgentAPI",
+    "RunnerRegistry",
+    "RunnerEntry",
+    "runner_registry",
     "TurnEvent",
     "AgentState",
     "Config",

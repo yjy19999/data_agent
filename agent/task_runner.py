@@ -36,9 +36,9 @@ from pathlib import Path
 from typing import Any
 
 from .agent import Agent, TurnEvent
+from .agent_factory import AgentFactory
 from .config import Config
-from .sandbox import SandboxedRegistry
-from .tools.profiles import get_profile, infer_profile
+from .runner_registry import runner_registry
 
 
 @dataclass
@@ -68,6 +68,13 @@ IMPORTANT RULES:
 5. If fixing code after a test failure, read the failing test output carefully
    and make targeted fixes. Do not rewrite everything from scratch.
 """
+
+runner_registry.register(
+    "coding",
+    profile="auto",
+    system_prompt=_CODING_SYSTEM_PROMPT,
+    description="Code generation, testing, and documentation",
+)
 
 _TASK_INTAKE_PROMPT = """\
 Task: {task}
@@ -285,6 +292,7 @@ class CodingTaskRunner:
         session_id: str | None = None,
         logs_dir: str | Path | None = None,
         memory_log_dir: str | Path | None = None,
+        agent_factory: AgentFactory | None = None,
     ):
         """
         Args:
@@ -297,6 +305,9 @@ class CodingTaskRunner:
                         file and workspace folder share the same identifier.
             logs_dir: Directory for trajectory/trace files. Defaults to api_logs/.
             memory_log_dir: Directory for compression memory logs. Defaults to memory_logs/.
+            agent_factory: Optional factory that controls tool profile and system
+                           prompt. When provided, overrides the default profile
+                           derived from config.tool_profile.
         """
         self.workspace = Path(workspace).resolve()
         self.workspace.mkdir(parents=True, exist_ok=True)
@@ -307,39 +318,25 @@ class CodingTaskRunner:
         self.session_id = session_id
         self.logs_dir = str(logs_dir) if logs_dir else None
         self.memory_log_dir = str(memory_log_dir) if memory_log_dir else None
+        self.agent_factory = agent_factory
 
     def _make_agent(self) -> Agent:
-        """Create a sandboxed Agent."""
-        # Build a sandboxed registry from the appropriate profile
-        profile_name = self.config.tool_profile
-        if profile_name == "auto":
-            profile_name = infer_profile(self.config.model)
+        """Create a sandboxed Agent, delegating to agent_factory if set."""
+        if self.agent_factory is not None:
+            return self.agent_factory.build(
+                workspace=self.workspace,
+                session_id=self.session_id,
+                logs_dir=Path(self.logs_dir) if self.logs_dir else None,
+                memory_log_dir=Path(self.memory_log_dir) if self.memory_log_dir else None,
+            )
 
-        base_registry = get_profile(profile_name).build_registry()
-        sandbox = SandboxedRegistry(self.workspace)
-        for schema in base_registry.schemas():
-            tool = base_registry.get(schema["function"]["name"])
-            if tool:
-                sandbox.register(tool)
-
-        agent = Agent(
-            config=Config(
-                base_url=self.config.base_url,
-                api_key=self.config.api_key,
-                model=self.config.model,
-                stream=self.config.stream,
-                max_tool_iterations=self.config.max_tool_iterations,
-                tool_profile=self.config.tool_profile,
-                context_limit=self.config.context_limit,
-                compression_threshold=self.config.compression_threshold,
-                system_prompt=_CODING_SYSTEM_PROMPT,
-            ),
-            registry=sandbox,
+        # Default: look up profile + system prompt from the runner registry
+        return runner_registry.make_factory("coding", self.config).build(
+            workspace=self.workspace,
             session_id=self.session_id,
-            logs_dir=self.logs_dir,
-            memory_log_dir=self.memory_log_dir,
+            logs_dir=Path(self.logs_dir) if self.logs_dir else None,
+            memory_log_dir=Path(self.memory_log_dir) if self.memory_log_dir else None,
         )
-        return agent
 
     # ------------------------------------------------------------------
     # Main blocking interface

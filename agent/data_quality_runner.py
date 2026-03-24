@@ -9,10 +9,10 @@ from pathlib import Path
 from typing import Any
 
 from .agent import Agent, TurnEvent
+from .agent_factory import AgentFactory
 from .config import Config
 from .data_inspector import build_input_manifest
-from .sandbox import SandboxedRegistry
-from .tools.profiles import get_profile, infer_profile
+from .runner_registry import runner_registry
 
 
 _QUALITY_SYSTEM_PROMPT = """\
@@ -45,6 +45,13 @@ Quality targets:
 5. Safety / Compliance
 6. Task Utility
 """
+
+runner_registry.register(
+    "quality",
+    profile="auto",
+    system_prompt=_QUALITY_SYSTEM_PROMPT,
+    description="Data quality inspection and reporting",
+)
 
 _SCHEMA_PROMPT = """\
 Read `InputManifest.json` first.
@@ -169,6 +176,7 @@ class DataQualityRunner:
         session_id: str | None = None,
         logs_dir: str | Path | None = None,
         memory_log_dir: str | Path | None = None,
+        agent_factory: AgentFactory | None = None,
         scan_bytes: int = 200_000,
         chunk_chars: int = 4_000,
         preview_chars: int = 800,
@@ -181,6 +189,7 @@ class DataQualityRunner:
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self.logs_dir = Path(logs_dir) if logs_dir else None
         self.memory_log_dir = Path(memory_log_dir) if memory_log_dir else None
+        self.agent_factory = agent_factory
         self.scan_bytes = scan_bytes
         self.chunk_chars = chunk_chars
         self.preview_chars = preview_chars
@@ -188,33 +197,21 @@ class DataQualityRunner:
         self.max_json_records = max_json_records
 
     def _make_agent(self) -> Agent:
-        profile_name = self.config.tool_profile
-        if profile_name == "auto":
-            profile_name = infer_profile(self.config.model)
+        """Create a sandboxed Agent, delegating to agent_factory if set."""
+        if self.agent_factory is not None:
+            return self.agent_factory.build(
+                workspace=self.workspace,
+                session_id=self.session_id,
+                logs_dir=self.logs_dir,
+                memory_log_dir=self.memory_log_dir,
+            )
 
-        base_registry = get_profile(profile_name).build_registry()
-        sandbox = SandboxedRegistry(self.workspace)
-        for schema in base_registry.schemas():
-            tool = base_registry.get(schema["function"]["name"])
-            if tool:
-                sandbox.register(tool)
-
-        return Agent(
-            config=Config(
-                base_url=self.config.base_url,
-                api_key=self.config.api_key,
-                model=self.config.model,
-                stream=self.config.stream,
-                max_tool_iterations=self.config.max_tool_iterations,
-                tool_profile=self.config.tool_profile,
-                context_limit=self.config.context_limit,
-                compression_threshold=self.config.compression_threshold,
-                system_prompt=_QUALITY_SYSTEM_PROMPT,
-            ),
-            registry=sandbox,
+        # Default: look up profile + system prompt from the runner registry
+        return runner_registry.make_factory("quality", self.config).build(
+            workspace=self.workspace,
             session_id=self.session_id,
-            logs_dir=str(self.logs_dir) if self.logs_dir else None,
-            memory_log_dir=str(self.memory_log_dir) if self.memory_log_dir else None,
+            logs_dir=self.logs_dir,
+            memory_log_dir=self.memory_log_dir,
         )
 
     def run(

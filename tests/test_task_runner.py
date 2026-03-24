@@ -105,7 +105,7 @@ class TestMakeAgent:
             config=Config(model="test", api_key="test"),
         )
         with (
-            patch("agent.task_runner.Agent") as mock_agent_cls,
+            patch("agent.agent_factory.Agent") as mock_agent_cls,
             patch("agent.agent.SessionRecordingService"),
             patch("agent.agent.LLMClient"),
         ):
