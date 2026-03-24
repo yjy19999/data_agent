@@ -17,8 +17,16 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
+from rich import box
+
 from agent import Config
 from agent.data_quality_runner import DataQualityRunner, _DEFAULT_FOCUS
+
+console = Console()
 
 
 SAMPLE_DIR = Path(__file__).parent / "sample"
@@ -57,7 +65,7 @@ def main() -> int:
 
     if args.clean and output_dir.exists():
         shutil.rmtree(output_dir)
-        print(f"Cleaned output: {output_dir}")
+        console.print(f"[yellow]Cleaned output:[/yellow] {output_dir}")
 
     workspace.mkdir(parents=True, exist_ok=True)
     logs_dir.mkdir(parents=True, exist_ok=True)
@@ -78,16 +86,21 @@ def main() -> int:
 
     focus = args.focus or _DEFAULT_FOCUS
 
-    print(f"Model:      {config.model}")
-    print(f"Output dir: {output_dir}")
-    print(f"  files/      → {workspace}")
-    print(f"  trajectory/ → {logs_dir}")
-    print(f"  memory/     → {memory_dir}")
-    print(f"Focus:      {focus[:80]}{'...' if len(focus) > 80 else ''}")
-    print("Inputs:")
-    for item in args.inputs:
-        print(f"  - {Path(item).expanduser()}")
-    print()
+    # ── Pre-run config panel ────────────────────────────────────────────────
+    cfg_table = Table(box=None, show_header=False, padding=(0, 1))
+    cfg_table.add_column(style="bold cyan", no_wrap=True)
+    cfg_table.add_column()
+    cfg_table.add_row("Model",     config.model)
+    cfg_table.add_row("Output",    str(output_dir))
+    cfg_table.add_row("  files/",  str(workspace))
+    cfg_table.add_row("  traj/",   str(logs_dir))
+    cfg_table.add_row("  memory/", str(memory_dir))
+    cfg_table.add_row("Focus",     focus[:80] + ("..." if len(focus) > 80 else ""))
+    # List input files as individual rows
+    for i, item in enumerate(args.inputs):
+        label = "Inputs" if i == 0 else ""
+        cfg_table.add_row(label, str(Path(item).expanduser()))
+    console.print(Panel(cfg_table, title="[bold]Run Configuration[/bold]", border_style="blue"))
 
     runner = DataQualityRunner(
         workspace=workspace,
@@ -98,49 +111,50 @@ def main() -> int:
     )
     result = runner.run(args.inputs, focus=focus, verbose=not args.quiet)
 
-    # Final summary — always printed regardless of --quiet
-    print()
-    print("=" * 60)
-    print(f"Decision:   {result.status.upper()}")
-    print(f"Manifest:   {result.manifest_file}")
-
-    if result.schema_files:
-        print("Schema:")
-        for f in result.schema_files:
-            print(f"  {f}")
+    # ── Result panel ────────────────────────────────────────────────────────
+    status = result.status.upper()
+    if result.status == "accept":
+        status_text = Text(f"✓  {status}", style="bold green")
+        border = "green"
+    elif result.status == "review":
+        status_text = Text(f"~  {status}", style="bold yellow")
+        border = "yellow"
     else:
-        print("Schema:     (none)")
+        status_text = Text(f"✗  {status}", style="bold red")
+        border = "red"
 
-    if result.report_files:
-        print("Reports:")
-        for f in result.report_files:
-            print(f"  {f}")
-    else:
-        print("Reports:    (none)")
-
+    res_table = Table(box=None, show_header=False, padding=(0, 1))
+    res_table.add_column(style="bold cyan", no_wrap=True)
+    res_table.add_column()
+    res_table.add_row("Decision",  status_text)
+    res_table.add_row("Manifest",  result.manifest_file or "(none)")
+    res_table.add_row("Schema",    ", ".join(result.schema_files) or "(none)")
+    res_table.add_row("Reports",   ", ".join(result.report_files) or "(none)")
     if result.overall_summary:
         summary = result.overall_summary
-        print(f"Summary:    {summary[:120]}{'...' if len(summary) > 120 else ''}")
-
+        res_table.add_row("Summary", summary[:120] + ("..." if len(summary) > 120 else ""))
     if result.error:
-        print(f"Error:      {result.error}")
+        res_table.add_row("Error", Text(result.error, style="red"))
+    console.print(Panel(res_table, title="[bold]Result[/bold]", border_style=border))
 
-    print("=" * 60)
-
-    # Per-file listing with line count + byte size (mirrors task_run.py)
+    # ── Output files table ──────────────────────────────────────────────────
     all_output_files = (
         ([result.manifest_file] if result.manifest_file else [])
         + result.schema_files
         + result.report_files
     )
     if all_output_files:
-        print("\nOutput files:")
+        files_table = Table(box=box.SIMPLE, show_header=True, header_style="bold cyan")
+        files_table.add_column("File", style="white")
+        files_table.add_column("Lines", justify="right", style="dim")
+        files_table.add_column("Bytes", justify="right", style="dim")
         for f in all_output_files:
             p = workspace / f
             if p.exists():
-                size = p.stat().st_size
+                size  = p.stat().st_size
                 lines = p.read_text(errors="replace").count("\n") + 1
-                print(f"  {f:<40} {lines:>4} lines  {size:>6} bytes")
+                files_table.add_row(f, str(lines), f"{size:,}")
+        console.print(Panel(files_table, title="[bold]Output Files[/bold]", border_style="blue"))
 
     return 0 if result.status in {"accept", "review"} else 1
 
