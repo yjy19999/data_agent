@@ -8,10 +8,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from rich.panel import Panel
+from rich.table import Table
+
 from .agent import Agent, TurnEvent
 from .agent_factory import AgentFactory
 from .config import Config
 from .data_inspector import build_input_manifest
+from .progress import ProgressPrinter
 from .runner_registry import runner_registry
 
 
@@ -45,6 +49,59 @@ Quality targets:
 5. Safety / Compliance
 6. Task Utility
 """
+
+# ---------------------------------------------------------------------------
+# Rich progress printer for the quality runner
+# ---------------------------------------------------------------------------
+
+class _QualityProgressPrinter(ProgressPrinter):
+    """Quality-runner progress printer: adds manifest summary and gate decision panel."""
+
+    PHASES = {
+        "prepare_inputs": "Staging Inputs",
+        "schema_analysis": "Phase 1 — Schema Analysis",
+        "quality_gate":    "Phase 2 — Quality Assessment",
+        "write_results":   "Phase 3 — Gate Decision",
+    }
+
+    def handle(self, event: TurnEvent) -> None:
+        if event.type == "manifest_ready":
+            self._console.print(f"  [dim]manifest:[/] {event.data}")
+        else:
+            super().handle(event)
+
+    def _print_result(self, r: "DataQualityResult") -> None:
+        self._console.print()
+        table = Table(show_header=False, box=None, padding=(0, 2), expand=False)
+        table.add_column("key", style="bold", no_wrap=True)
+        table.add_column("value")
+
+        if r.status == "accept":
+            table.add_row("Decision", "[bold green]ACCEPT[/]")
+            border = "green"
+        elif r.status == "review":
+            table.add_row("Decision", "[bold yellow]REVIEW[/]")
+            border = "yellow"
+        else:
+            table.add_row("Decision", f"[bold red]{r.status.upper()}[/]")
+            border = "red"
+
+        if r.overall_summary:
+            table.add_row("Summary", r.overall_summary[:120])
+        if r.schema_files:
+            table.add_row("Schema",  ", ".join(f"[cyan]{f}[/]" for f in r.schema_files))
+        if r.report_files:
+            table.add_row("Reports", ", ".join(f"[cyan]{f}[/]" for f in r.report_files))
+
+        self._console.print(Panel(
+            table,
+            title="[bold]Result[/]",
+            border_style=border,
+            padding=(1, 2),
+        ))
+
+
+# ---------------------------------------------------------------------------
 
 runner_registry.register(
     "quality",
@@ -221,16 +278,17 @@ class DataQualityRunner:
         focus: str = _DEFAULT_FOCUS,
         verbose: bool = True,
     ) -> DataQualityResult:
+        printer = _QualityProgressPrinter() if verbose else None
         result = DataQualityResult(inputs=[str(Path(item)) for item in inputs])
         try:
             for event in self.run_stream(inputs, focus=focus):
-                if verbose and event.type == "phase":
-                    print(f"\n--- [data-quality] {event.data} ---", flush=True)
-                elif verbose and event.type == "manifest_ready":
-                    print(f"  manifest: {event.data}", flush=True)
+                if printer:
+                    printer.handle(event)
                 if event.type == "result":
                     return event.data
         except Exception as exc:
+            if printer:
+                printer.error(str(exc))
             result.status = "error"
             result.error = str(exc)
         return result

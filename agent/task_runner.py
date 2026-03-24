@@ -541,71 +541,38 @@ class CodingTaskRunner:
 # Rich console progress printer
 # ---------------------------------------------------------------------------
 
-from rich.console import Console
-from rich.live import Live
-from rich.markdown import Markdown
 from rich.panel import Panel
-from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 
-_PHASE_ICONS = {
-    "task_intake":  ("clipboard",  "Phase 0 — Task Intake"),
-    "repo_recon":   ("magnifier",  "Phase 1 — Repo Reconnaissance"),
-    "plan_design":  ("blueprint",  "Phase 2 — Plan / Solution Design"),
-    "write_code":   ("keyboard",   "Phase 3 — Writing Code"),
-    "write_tests":  ("test_tube",  "Phase 4 — Writing Tests"),
-    "write_docs":   ("memo",       "Phase 7 — Writing Documentation"),
-}
+from .progress import ProgressPrinter
 
 
-class _ProgressPrinter:
-    """Rich-powered real-time progress printer for task runs."""
+class _ProgressPrinter(ProgressPrinter):
+    """Task-runner progress printer: adds test/review panels and phase labels."""
 
-    def __init__(self):
-        self._console = Console()
-        self._in_text = False
-        self._text_buf: list[str] = []
-        self._tool_count = 0
+    PHASES = {
+        "task_intake": "Phase 0 — Task Intake",
+        "repo_recon":  "Phase 1 — Repo Reconnaissance",
+        "plan_design": "Phase 2 — Plan / Solution Design",
+        "write_code":  "Phase 3 — Writing Code",
+        "write_tests": "Phase 4 — Writing Tests",
+        "write_docs":  "Phase 7 — Writing Documentation",
+    }
+
+    def _phase_label(self, phase: str) -> str:
+        if phase in self.PHASES:
+            return self.PHASES[phase]
+        if phase.startswith("run_tests"):
+            return f"Running Tests (iteration {phase.split('_')[-1]})"
+        if phase.startswith("fix_"):
+            return f"Fixing Code (attempt {phase.split('_')[-1]})"
+        if phase.startswith("review_"):
+            return f"Phase 6 — Review (round {phase.split('_')[-1]})"
+        return phase
 
     def handle(self, event: TurnEvent) -> None:
-        if event.type == "phase":
-            self._flush_text()
-            self._tool_count = 0
-            label = self._phase_label(event.data)
-            icon = self._phase_icon(event.data)
-            self._console.print()
-            self._console.rule(
-                f"[bold cyan]{icon} {label}[/]", style="cyan",
-            )
-
-        elif event.type == "text":
-            self._in_text = True
-            self._text_buf.append(event.data)
-
-        elif event.type == "tool_start":
-            self._flush_text()
-            self._tool_count += 1
-            name = event.data.get("name", "?")
-            args = event.data.get("arguments", {})
-            summary = self._summarize_tool(name, args)
-            self._console.print(
-                f"  [dim]{self._tool_count}.[/] [bold yellow]{name}[/]"
-                f"[dim]({summary})[/]"
-            )
-
-        elif event.type == "tool_end":
-            result = event.data.get("result", "")
-            name = event.data.get("name", "")
-            first_line = result.split("\n")[0][:120] if result else ""
-            if first_line.startswith("[ok]"):
-                self._console.print(f"     [green]{first_line}[/]")
-            elif first_line.startswith("[error]"):
-                self._console.print(f"     [red]{first_line}[/]")
-            else:
-                self._console.print(f"     [dim]{first_line}[/]")
-
-        elif event.type == "test_result":
+        if event.type == "test_result":
             self._flush_text()
             passed = event.data.get("passed", False)
             output = event.data.get("output", "")
@@ -614,8 +581,7 @@ class _ProgressPrinter:
             if passed:
                 self._console.print(Panel(
                     f"[bold green]PASSED[/]  [dim](iteration {iteration})[/]",
-                    border_style="green",
-                    padding=(0, 2),
+                    border_style="green", padding=(0, 2),
                 ))
             else:
                 lines = output.strip().splitlines()
@@ -633,8 +599,7 @@ class _ProgressPrinter:
                 self._console.print(Panel(
                     fail_text,
                     title=f"[bold red]FAILED[/] [dim](iteration {iteration})[/]",
-                    border_style="red",
-                    padding=(0, 1),
+                    border_style="red", padding=(0, 1),
                 ))
 
         elif event.type == "review_result":
@@ -645,57 +610,20 @@ class _ProgressPrinter:
             if passed:
                 self._console.print(Panel(
                     f"[bold green]REVIEW PASSED[/]  [dim](round {round_num})[/]",
-                    border_style="green",
-                    padding=(0, 2),
+                    border_style="green", padding=(0, 2),
                 ))
             else:
                 self._console.print(Panel(
                     f"[bold yellow]REVIEW FAILED[/]  [dim](round {round_num}) — looping back to write tests[/]",
-                    border_style="yellow",
-                    padding=(0, 2),
+                    border_style="yellow", padding=(0, 2),
                 ))
 
-        elif event.type == "result":
-            self._flush_text()
-            r = event.data
-            self._print_result(r)
-
-        elif event.type == "usage":
-            pass
-
-        elif event.type == "error":
-            self._flush_text()
-            self._console.print(f"  [bold red]Error:[/] {event.data}")
-
-    def error(self, msg: str) -> None:
-        self._flush_text()
-        self._console.print(Panel(
-            f"[bold red]{msg}[/]",
-            title="[red]Exception[/]",
-            border_style="red",
-        ))
-
-    def _flush_text(self) -> None:
-        if self._text_buf:
-            text = "".join(self._text_buf).strip()
-            if text:
-                self._console.print()
-                self._console.print(
-                    Markdown(text),
-                    style="white",
-                )
-            self._text_buf.clear()
-            self._in_text = False
+        else:
+            super().handle(event)
 
     def _print_result(self, r: TaskResult) -> None:
         self._console.print()
-
-        table = Table(
-            show_header=False,
-            box=None,
-            padding=(0, 2),
-            expand=False,
-        )
+        table = Table(show_header=False, box=None, padding=(0, 2), expand=False)
         table.add_column("key", style="bold", no_wrap=True)
         table.add_column("value")
 
@@ -703,29 +631,19 @@ class _ProgressPrinter:
             table.add_row("Status", "[bold green]PASSED[/]")
         else:
             table.add_row("Status", f"[bold red]{r.status.upper()}[/]")
-
         table.add_row("Iterations", str(r.iterations))
-
         if r.code_files:
-            files_text = "\n".join(f"[cyan]{f}[/]" for f in r.code_files)
-            table.add_row("Code Files", files_text)
-
+            table.add_row("Code Files", "\n".join(f"[cyan]{f}[/]" for f in r.code_files))
         if r.test_files:
-            files_text = "\n".join(f"[cyan]{f}[/]" for f in r.test_files)
-            table.add_row("Test Files", files_text)
-
+            table.add_row("Test Files", "\n".join(f"[cyan]{f}[/]" for f in r.test_files))
         if r.doc_files:
-            files_text = "\n".join(f"[cyan]{f}[/]" for f in r.doc_files)
-            table.add_row("Doc Files", files_text)
-
+            table.add_row("Doc Files",  "\n".join(f"[cyan]{f}[/]" for f in r.doc_files))
         if r.test_output:
             lines = r.test_output.strip().splitlines()
             if lines:
                 summary = lines[-1]
-                if "passed" in summary.lower():
-                    table.add_row("Tests", f"[green]{summary}[/]")
-                else:
-                    table.add_row("Tests", f"[red]{summary}[/]")
+                style = "green" if "passed" in summary.lower() else "red"
+                table.add_row("Tests", f"[{style}]{summary}[/]")
 
         self._console.print(Panel(
             table,
@@ -733,48 +651,3 @@ class _ProgressPrinter:
             border_style="cyan" if r.status == "passed" else "red",
             padding=(1, 2),
         ))
-
-    @staticmethod
-    def _phase_label(phase: str) -> str:
-        _, label = _PHASE_ICONS.get(phase, (None, None))
-        if label:
-            return label
-        if phase.startswith("run_tests"):
-            n = phase.split("_")[-1]
-            return f"Running Tests (iteration {n})"
-        if phase.startswith("fix_"):
-            n = phase.split("_")[-1]
-            return f"Fixing Code (attempt {n})"
-        if phase.startswith("review_"):
-            n = phase.split("_")[-1]
-            return f"Phase 6 — Review (round {n})"
-        return phase
-
-    @staticmethod
-    def _phase_icon(phase: str) -> str:
-        if phase in ("task_intake", "repo_recon", "plan_design", "write_code", "write_tests", "write_docs"):
-            return "[bold]>>>[/]"
-        if phase.startswith(("run_tests", "fix_", "review_")):
-            return "[bold]>>>[/]"
-        return ">>>"
-
-    @staticmethod
-    def _summarize_tool(name: str, args: dict) -> str:
-        """One-line summary of tool arguments."""
-        if name in ("shell", "Bash"):
-            cmd = args.get("command", "")
-            if len(cmd) > 80:
-                cmd = cmd[:77] + "..."
-            return cmd
-        if "path" in args:
-            return args["path"]
-        if "file_path" in args:
-            return args["file_path"]
-        if "pattern" in args:
-            return args["pattern"]
-        for v in args.values():
-            if isinstance(v, str):
-                if len(v) > 60:
-                    return v[:57] + "..."
-                return v
-        return ""
