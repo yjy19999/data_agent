@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import json
 from collections import Counter
 from dataclasses import dataclass, asdict
@@ -52,6 +53,17 @@ def detect_data_kind(path: str | Path, sample_text: str) -> str:
     ext = p.suffix.lower()
     stripped = sample_text.lstrip()
 
+    # .gz files: inspect inner suffix (e.g. data.jsonl.gz → inner ".jsonl")
+    # If no inner suffix is present, default to jsonl_gz.
+    if ext == ".gz":
+        inner_ext = Path(p.stem).suffix.lower()
+        if inner_ext == ".json":
+            return "json_gz"
+        if inner_ext in {".jsonl", ".ndjson"}:
+            return "jsonl_gz"
+        # No recognisable inner suffix — guess jsonl_gz (most common for .gz dumps)
+        return "jsonl_gz"
+
     if ext in {".jsonl", ".ndjson"}:
         return "jsonl"
     if ext == ".json":
@@ -84,8 +96,12 @@ def inspect_file(
 ) -> FileInspection:
     p = Path(path)
     size_bytes = p.stat().st_size
-    with p.open("rb") as handle:
-        sample = handle.read(scan_bytes)
+    if p.suffix.lower() == ".gz":
+        with gzip.open(p, "rb") as handle:
+            sample = handle.read(scan_bytes)
+    else:
+        with p.open("rb") as handle:
+            sample = handle.read(scan_bytes)
     text = sample.decode("utf-8", errors="replace")
     kind = detect_data_kind(p, text)
     schema_family = infer_schema_family(
@@ -199,7 +215,7 @@ def infer_schema_family(
             "sampled_records": 1,
         }
 
-    if kind not in {"json", "jsonl"}:
+    if kind not in {"json", "jsonl", "json_gz", "jsonl_gz"}:
         return {
             "family": "code_sample" if kind == "code" else "document",
             "confidence": 0.9 if kind == "code" else 0.6,
@@ -238,7 +254,7 @@ def infer_schema_family(
 
 
 def _load_json_records(sample_text: str, kind: str, *, max_json_records: int) -> tuple[list[Any], str]:
-    if kind == "jsonl":
+    if kind in {"jsonl", "jsonl_gz"}:
         records = []
         for line in sample_text.splitlines():
             stripped = line.strip()
@@ -247,7 +263,7 @@ def _load_json_records(sample_text: str, kind: str, *, max_json_records: int) ->
             records.append(json.loads(stripped))
             if len(records) >= max_json_records:
                 break
-        return records, "jsonl"
+        return records, kind
 
     payload = json.loads(sample_text)
     if isinstance(payload, list):
