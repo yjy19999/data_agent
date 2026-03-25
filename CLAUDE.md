@@ -47,7 +47,7 @@ agent/
 │                       decouples tool-profile + system-prompt from runner plumbing
 ├── runner_registry.py→ RunnerRegistry: maps task-type names to default AgentFactory
 │                       configs; profile resolution order: explicit kwarg >
-│                       LLM_TOOL_PROFILE env var > registered default
+│                       LLM_<NAME>_PROFILE > LLM_TOOL_PROFILE > registered default
 ├── api.py            → AgentAPI: sync/async wrapper around Agent
 ├── client.py         → LLMClient: OpenAI-compatible HTTP, streaming,
 │                       ChatResponse for stream/non-stream
@@ -97,8 +97,9 @@ cli/
 
 **AgentFactory + RunnerRegistry** — separates *what tools/role* from *where to run*. Each runner type registers a default `(profile, system_prompt)` pair in `RunnerRegistry`. At runtime the factory wraps workspace setup, sandboxing, and session/log wiring. Profile resolution order:
 1. Explicit `agent_factory=` kwarg passed to a runner
-2. `LLM_TOOL_PROFILE` env var (when not `"auto"`)
-3. Profile registered for that task type in the registry
+2. Per-runner env var `LLM_<NAME>_PROFILE` (e.g. `LLM_CODING_PROFILE=claude`, `LLM_QUALITY_PROFILE=datacheck`)
+3. Global `LLM_TOOL_PROFILE` env var (when not `"auto"`)
+4. Profile registered for that task type in the registry
 
 To add a new task type: register an entry in `RunnerRegistry`, write a runner class that calls `registry.make_factory(name, config)`, and add an entry-point script.
 
@@ -177,7 +178,9 @@ Trace files and workspace folders follow the same naming convention as `CodingTa
 | `LLM_MODEL` | `llama3.2` | Model name |
 | `LLM_STREAM` | `true` | Enable streaming |
 | `LLM_MAX_TOOL_ITERATIONS` | `10` | Max tool calls per user turn |
-| `LLM_TOOL_PROFILE` | `auto` | `auto`, `claude`, `gemini`, `gpt`, `qwen`, `datacheck`, `default`, `readonly`, `minimal` |
+| `LLM_TOOL_PROFILE` | `auto` | Global profile: `auto`, `claude`, `gemini`, `gpt`, `qwen`, `datacheck`, `default`, `readonly`, `minimal` |
+| `LLM_CODING_PROFILE` | `claude` | Per-runner override for `CodingTaskRunner` |
+| `LLM_QUALITY_PROFILE` | `datacheck` | Per-runner override for `DataQualityRunner` |
 | `LLM_CONTEXT_LIMIT` | `200000` | Token context window |
 | `LLM_COMPRESSION_THRESHOLD` | `0.5` | Fraction of context that triggers compression |
 | `LLM_COMPRESSION_PRESERVE_FRACTION` | `0.3` | Fraction of recent history to keep verbatim |

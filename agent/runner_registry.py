@@ -4,24 +4,15 @@ RunnerRegistry — maps task-type names to default AgentFactory configurations.
 This is the central place to control which tool profile and system prompt
 each task type uses by default, without touching any runner code.
 
-Usage — change the default profile for all coding runs::
-
-    from agent import runner_registry
-    from agent.task_runner import _CODING_SYSTEM_PROMPT
-
-    runner_registry.register(
-        "coding",
-        profile="opencode",
-        system_prompt=_CODING_SYSTEM_PROMPT,
-    )
-
 Profile priority (highest → lowest):
 1. Explicit ``agent_factory`` kwarg passed to a runner constructor
-2. ``config.tool_profile`` when it is not ``"auto"`` (e.g. set via LLM_TOOL_PROFILE env var)
-3. The profile registered here for this task type
+2. Per-runner env var: ``LLM_{NAME}_PROFILE`` (e.g. ``LLM_CODING_PROFILE=claude``)
+3. Global ``LLM_TOOL_PROFILE`` when it is not ``"auto"``
+4. The profile registered here for this task type
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 from .agent_factory import AgentFactory
@@ -92,11 +83,14 @@ class RunnerRegistry:
                 f"No runner registered for task type '{name}'. "
                 f"Registered types: {self.names()}"
             )
-        profile = (
-            config.tool_profile
-            if config.tool_profile != "auto"
-            else entry.profile
-        )
+        # Per-runner env var takes priority (e.g. LLM_CODING_PROFILE, LLM_QUALITY_PROFILE)
+        per_runner_env = f"LLM_{name.upper()}_PROFILE"
+        if runner_profile := os.getenv(per_runner_env, ""):
+            profile = runner_profile
+        elif config.tool_profile != "auto":
+            profile = config.tool_profile
+        else:
+            profile = entry.profile
         return AgentFactory(
             config=config,
             profile=profile,
