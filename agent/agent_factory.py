@@ -76,6 +76,8 @@ class AgentFactory:
             if tool:
                 sandbox.register(tool)
 
+        system_prompt = self.system_prompt.rstrip() + f"\n\nYour workspace directory: {workspace}"
+
         return Agent(
             config=Config(
                 base_url=self.config.base_url,
@@ -86,7 +88,7 @@ class AgentFactory:
                 tool_profile=profile_name,
                 context_limit=self.config.context_limit,
                 compression_threshold=self.config.compression_threshold,
-                system_prompt=self.system_prompt,
+                system_prompt=system_prompt,
             ),
             registry=sandbox,
             session_id=session_id,

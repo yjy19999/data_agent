@@ -1,5 +1,5 @@
 """
-Tests for ReadDataTool (agent/tools/data.py).
+Tests for ReadFormatTool and ReadDataTool (agent/tools/data.py).
 """
 from __future__ import annotations
 
@@ -9,12 +9,12 @@ from pathlib import Path
 
 import pytest
 
-from agent.tools.data import ReadDataTool, _truncate_values
+from agent.tools.data import ReadFormatTool, ReadDataTool, _truncate_values
 
 
 @pytest.fixture
 def tool():
-    return ReadDataTool()
+    return ReadFormatTool()
 
 
 def write_json(path: Path, data) -> Path:
@@ -340,9 +340,148 @@ class TestFieldTruncationIntegration:
         assert '"id"' in out
 
 
+# ── ReadDataTool ───────────────────────────────────────────────────────────────
+
+@pytest.fixture
+def rdtool():
+    return ReadDataTool()
+
+
+class TestReadDataValidation:
+    def test_invalid_mode(self, rdtool, tmp_path):
+        f = tmp_path / "x.json"
+        f.write_text("{}")
+        out = rdtool.run(str(f), mode="csv")
+        assert "[error]" in out
+
+    def test_file_not_found(self, rdtool, tmp_path):
+        out = rdtool.run(str(tmp_path / "missing.json"), mode="json")
+        assert "[error]" in out
+        assert "not found" in out
+
+    def test_block_out_of_range(self, rdtool, tmp_path):
+        f = write_json(tmp_path / "a.json", {"x": 1})
+        out = rdtool.run(str(f), mode="json", block=99)
+        assert "[error]" in out
+        assert "out of range" in out
+
+    def test_line_out_of_range(self, rdtool, tmp_path):
+        f = write_jsonl(tmp_path / "a.jsonl", [{"x": 1}])
+        out = rdtool.run(str(f), mode="jsonl", line=99)
+        assert "[error]" in out
+        assert "out of range" in out
+
+
+class TestReadDataJson:
+    def test_index_shows_blocks(self, rdtool, tmp_path):
+        # 3 blocks of 4 chars each with block_size=4
+        f = tmp_path / "a.json"
+        f.write_text("A" * 12)
+        out = rdtool.run(str(f), mode="json", block_size=4)
+        assert "Blocks:  3" in out
+        assert "Block 1" in out
+        assert "Block 2" in out
+        assert "Block 3" in out
+
+    def test_index_hint(self, rdtool, tmp_path):
+        f = write_json(tmp_path / "a.json", list(range(100)))
+        out = rdtool.run(str(f), mode="json", block_size=100)
+        assert "block=N" in out
+
+    def test_read_block_full_content(self, rdtool, tmp_path):
+        content = json.dumps({"key": "value" * 50})
+        f = tmp_path / "a.json"
+        f.write_text(content)
+        # With small block_size there will be multiple blocks
+        out = rdtool.run(str(f), mode="json", block=1, block_size=100)
+        assert "Block:   1" in out
+        # No truncation marker
+        assert "[truncated" not in out
+
+    def test_no_value_truncation(self, rdtool, tmp_path):
+        long_value = "x" * 500
+        f = write_json(tmp_path / "a.json", {"field": long_value})
+        out = rdtool.run(str(f), mode="json", block=1)
+        assert "[truncated" not in out
+        assert long_value in out
+
+    def test_single_block_file(self, rdtool, tmp_path):
+        f = write_json(tmp_path / "a.json", {"k": "v"})
+        out = rdtool.run(str(f), mode="json")
+        assert "Block 1" in out
+
+    def test_json_gz_index(self, rdtool, tmp_path):
+        f = tmp_path / "a.json.gz"
+        write_gz(f, json.dumps({"a": 1}))
+        out = rdtool.run(str(f), mode="json_gz")
+        assert "Blocks:" in out
+
+
+class TestReadDataJsonl:
+    def test_line_index_shows_sampled_lines(self, rdtool, tmp_path):
+        records = [{"i": i} for i in range(20)]
+        f = write_jsonl(tmp_path / "a.jsonl", records)
+        out = rdtool.run(str(f), mode="jsonl")
+        assert "Lines:   20" in out
+        assert "Line 1" in out
+        assert "line=N" in out
+
+    def test_line_index_hint(self, rdtool, tmp_path):
+        f = write_jsonl(tmp_path / "a.jsonl", [{"x": 1}, {"x": 2}])
+        out = rdtool.run(str(f), mode="jsonl")
+        assert "line=N" in out
+
+    def test_small_line_returns_full_content(self, rdtool, tmp_path):
+        records = [{"msg": "hello"}, {"msg": "world"}]
+        f = write_jsonl(tmp_path / "a.jsonl", records)
+        out = rdtool.run(str(f), mode="jsonl", line=1)
+        assert "hello" in out
+        assert "Blocks:" not in out
+
+    def test_large_line_returns_block_index(self, rdtool, tmp_path):
+        big = {"data": "x" * 5000}
+        f = write_jsonl(tmp_path / "a.jsonl", [big])
+        out = rdtool.run(str(f), mode="jsonl", line=1, block_size=1000)
+        assert "Blocks:" in out
+        assert "block=N" in out
+
+    def test_read_specific_line_and_block(self, rdtool, tmp_path):
+        big = {"data": "A" * 5000}
+        f = write_jsonl(tmp_path / "a.jsonl", [big])
+        out = rdtool.run(str(f), mode="jsonl", line=1, block=1, block_size=1000)
+        assert "Block:   1" in out
+        assert "[truncated" not in out
+        assert "A" * 100 in out
+
+    def test_no_value_truncation_in_line(self, rdtool, tmp_path):
+        long_val = "z" * 500
+        f = write_jsonl(tmp_path / "a.jsonl", [{"field": long_val}])
+        out = rdtool.run(str(f), mode="jsonl", line=1)
+        assert "[truncated" not in out
+        assert long_val in out
+
+    def test_jsonl_gz(self, rdtool, tmp_path):
+        content = "\n".join(json.dumps({"i": i}) for i in range(5))
+        f = tmp_path / "a.jsonl.gz"
+        write_gz(f, content)
+        out = rdtool.run(str(f), mode="jsonl_gz")
+        assert "Lines:   5" in out
+
+    def test_blank_lines_ignored_in_count(self, rdtool, tmp_path):
+        f = tmp_path / "a.jsonl"
+        f.write_text('\n{"a":1}\n\n{"b":2}\n')
+        out = rdtool.run(str(f), mode="jsonl")
+        assert "Lines:   2" in out
+
+
 # ── Profile integration ────────────────────────────────────────────────────────
 
 class TestProfileIntegration:
+    def test_datacheck_profile_includes_read_format(self):
+        from agent.tools.profiles import get_profile
+        profile = get_profile("datacheck")
+        assert "ReadFormat" in profile.tool_names()
+
     def test_datacheck_profile_includes_read_data(self):
         from agent.tools.profiles import get_profile
         profile = get_profile("datacheck")

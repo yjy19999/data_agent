@@ -118,13 +118,13 @@ class TestGlobalRegistry:
     def test_coding_is_registered(self):
         entry = runner_registry.get("coding")
         assert entry is not None
-        assert entry.profile == "auto"
+        assert entry.profile == "claude"
         assert entry.system_prompt == _CODING_SYSTEM_PROMPT
 
     def test_quality_is_registered(self):
         entry = runner_registry.get("quality")
         assert entry is not None
-        assert entry.profile == "auto"
+        assert entry.profile == "datacheck"
         assert entry.system_prompt == _QUALITY_SYSTEM_PROMPT
 
     def test_both_types_in_names(self):
@@ -151,7 +151,8 @@ class TestCodingTaskRunnerUsesRegistry:
             runner._make_agent()
             call_kwargs = mock_agent_cls.call_args
             config_arg = call_kwargs.kwargs.get("config") or call_kwargs[1].get("config")
-            assert config_arg.system_prompt == _CODING_SYSTEM_PROMPT
+            assert config_arg.system_prompt.startswith(_CODING_SYSTEM_PROMPT.rstrip())
+            assert "Your workspace directory:" in config_arg.system_prompt
 
     def test_make_agent_uses_sandboxed_registry(self, tmp_path):
         runner = CodingTaskRunner(
@@ -169,8 +170,9 @@ class TestCodingTaskRunnerUsesRegistry:
             registry = call_kwargs.kwargs.get("registry") or call_kwargs[1].get("registry")
             assert isinstance(registry, SandboxedRegistry)
 
-    def test_registry_profile_change_affects_runner(self, tmp_path):
+    def test_registry_profile_change_affects_runner(self, tmp_path, monkeypatch):
         """Changing the registry entry changes the profile used by the runner."""
+        monkeypatch.delenv("LLM_CODING_PROFILE", raising=False)
         original_entry = runner_registry.get("coding")
         try:
             runner_registry.register("coding", profile="readonly", system_prompt=_CODING_SYSTEM_PROMPT)
@@ -178,7 +180,6 @@ class TestCodingTaskRunnerUsesRegistry:
             factory = runner_registry.make_factory("coding", config)
             assert factory.profile == "readonly"
         finally:
-            # Restore original entry
             runner_registry.register(
                 "coding",
                 profile=original_entry.profile,
@@ -186,8 +187,9 @@ class TestCodingTaskRunnerUsesRegistry:
                 description=original_entry.description,
             )
 
-    def test_config_tool_profile_overrides_registry(self, tmp_path):
+    def test_config_tool_profile_overrides_registry(self, tmp_path, monkeypatch):
         """LLM_TOOL_PROFILE env var (config.tool_profile) wins over registry."""
+        monkeypatch.delenv("LLM_CODING_PROFILE", raising=False)
         config = Config(model="test", api_key="test", tool_profile="minimal")
         factory = runner_registry.make_factory("coding", config)
         assert factory.profile == "minimal"
@@ -212,7 +214,8 @@ class TestDataQualityRunnerUsesRegistry:
             runner._make_agent()
             call_kwargs = mock_agent_cls.call_args
             config_arg = call_kwargs.kwargs.get("config") or call_kwargs[1].get("config")
-            assert config_arg.system_prompt == _QUALITY_SYSTEM_PROMPT
+            assert config_arg.system_prompt.startswith(_QUALITY_SYSTEM_PROMPT.rstrip())
+            assert "Your workspace directory:" in config_arg.system_prompt
 
     def test_make_agent_uses_sandboxed_registry(self, tmp_path):
         runner = DataQualityRunner(
@@ -230,7 +233,8 @@ class TestDataQualityRunnerUsesRegistry:
             registry = call_kwargs.kwargs.get("registry") or call_kwargs[1].get("registry")
             assert isinstance(registry, SandboxedRegistry)
 
-    def test_registry_profile_change_affects_runner(self, tmp_path):
+    def test_registry_profile_change_affects_runner(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("LLM_QUALITY_PROFILE", raising=False)
         original_entry = runner_registry.get("quality")
         try:
             runner_registry.register("quality", profile="readonly", system_prompt=_QUALITY_SYSTEM_PROMPT)

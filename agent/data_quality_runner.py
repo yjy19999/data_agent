@@ -27,9 +27,10 @@ Your job is to inspect datasets and write concise, evidence-backed reports.
 IMPORTANT RULES:
 1. Work only inside the current working directory.
 2. Prefer reading `InputManifest.json` first. Only read raw inputs when the manifest is insufficient.
-3. To sample any .json, .jsonl, .json.gz, or .jsonl.gz file, ALWAYS use the ReadData tool.
-   Never use Read or Bash/cat on those file types — ReadData handles compression and protects
-   the context window.
+3. Two tools are available for reading .json, .jsonl, .json.gz, and .jsonl.gz files:
+   - ReadFormat: returns a bounded preview with value truncation — use for quick schema/shape inspection.
+   - ReadData: returns full content via block navigation, no truncation — use for deep content reading.
+   Never use Read or Bash/cat on those file types.
 4. Every score or conclusion must cite concrete evidence from the manifest or sampled content.
 5. When you write JSON files, they must be valid JSON.
 6. Focus on these six dimensions:
@@ -117,15 +118,16 @@ _SCHEMA_PROMPT = """\
 Read `InputManifest.json` first.
 
 IMPORTANT — sampling rule:
-- For any file ending in .json, .jsonl, .json.gz, or .jsonl.gz, use the ReadData tool
-  to sample it. Do NOT use Read or Bash/cat on these files — ReadData handles
-  compression, JSONL parsing, and context-window protection automatically.
+- For any file ending in .json, .jsonl, .json.gz, or .jsonl.gz, use the ReadFormat tool
+  to sample it. ReadFormat returns a bounded preview — ideal for quickly confirming schema
+  shape and key fields without flooding the context window.
+- Do NOT use Read or Bash/cat on those files.
 - For all other file types (code, text, markdown, etc.) use the Read tool as normal.
 
 Goal:
 1. Confirm the detailed data format for each input file.
 2. Decide whether each file is pure code, code sample, agent trajectory, QA, triple, webpage, or another family.
-3. For JSON / JSONL inputs, infer the schema family and key fields from the ReadData sample.
+3. For JSON / JSONL inputs, infer the schema family and key fields from the ReadFormat sample.
 4. Note any ambiguity, truncation risk, or places that require deeper inspection.
 
 Write two files:
@@ -157,8 +159,10 @@ Write two files:
 _QUALITY_PROMPT = """\
 Use `InputManifest.json`, `Schema.md`, and `Schema.json`.
 
-If you need to re-sample any file for evidence, use ReadData for .json/.jsonl/.json.gz/.jsonl.gz
-files. Do NOT use Read or Bash/cat on those files.
+If you need to read file content for evidence, use the ReadData tool for .json/.jsonl/.json.gz/.jsonl.gz
+files. ReadData returns full content without truncation — call it without a block argument first to get
+the navigation index, then use line=N or block=N to read the content you need.
+Do NOT use ReadFormat, Read, or Bash/cat on those files.
 
 Assess each file and the dataset overall against these six dimensions:
 - completeness

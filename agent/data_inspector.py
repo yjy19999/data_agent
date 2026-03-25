@@ -109,6 +109,7 @@ def inspect_file(
         kind=kind,
         sample_text=text,
         max_json_records=max_json_records,
+        scan_truncated=size_bytes > scan_bytes,
     )
     preview_chunks = chunk_text(
         text,
@@ -204,6 +205,7 @@ def infer_schema_family(
     kind: str,
     sample_text: str,
     max_json_records: int = 50,
+    scan_truncated: bool = False,
 ) -> dict[str, Any]:
     p = Path(path)
     if kind == "webpage":
@@ -227,14 +229,28 @@ def infer_schema_family(
     try:
         records, top_level_type = _load_json_records(sample_text, kind, max_json_records=max_json_records)
     except json.JSONDecodeError as exc:
-        return {
-            "family": "malformed_json",
-            "confidence": 1.0,
-            "top_level_type": "unknown",
-            "field_paths": [],
-            "sampled_records": 0,
-            "error": str(exc),
-        }
+        if scan_truncated and kind in {"json", "json_gz"}:
+            full_text = _read_full_text(p, kind)
+            try:
+                records, top_level_type = _load_json_records(full_text, kind, max_json_records=max_json_records)
+            except json.JSONDecodeError as full_exc:
+                return {
+                    "family": "malformed_json",
+                    "confidence": 1.0,
+                    "top_level_type": "unknown",
+                    "field_paths": [],
+                    "sampled_records": 0,
+                    "error": str(full_exc),
+                }
+        else:
+            return {
+                "family": "malformed_json",
+                "confidence": 1.0,
+                "top_level_type": "unknown",
+                "field_paths": [],
+                "sampled_records": 0,
+                "error": str(exc),
+            }
 
     flattened = Counter()
     for record in records:
@@ -260,7 +276,12 @@ def _load_json_records(sample_text: str, kind: str, *, max_json_records: int) ->
             stripped = line.strip()
             if not stripped:
                 continue
-            records.append(json.loads(stripped))
+            try:
+                records.append(json.loads(stripped))
+            except json.JSONDecodeError:
+                # Skip lines that fail to parse — typically the last line
+                # when the scan window cut the file mid-record.
+                continue
             if len(records) >= max_json_records:
                 break
         return records, kind
@@ -275,6 +296,14 @@ def _load_json_records(sample_text: str, kind: str, *, max_json_records: int) ->
             return payload["turns"][:max_json_records], "object(turns)"
         return [payload], "object"
     return [payload], type(payload).__name__
+
+
+def _read_full_text(path: Path, kind: str) -> str:
+    if kind == "json_gz":
+        with gzip.open(path, "rb") as fh:
+            return fh.read().decode("utf-8", errors="replace")
+    with path.open("rb") as fh:
+        return fh.read().decode("utf-8", errors="replace")
 
 
 def _looks_like_jsonl(sample_text: str) -> bool:

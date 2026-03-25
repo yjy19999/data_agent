@@ -63,7 +63,8 @@ class TestAgentFactoryBuild:
             factory.build(workspace=tmp_path)
             call_kwargs = mock_agent_cls.call_args
             config_arg = call_kwargs.kwargs.get("config") or call_kwargs[1].get("config")
-            assert config_arg.system_prompt == CUSTOM_PROMPT
+            assert config_arg.system_prompt.startswith(CUSTOM_PROMPT)
+            assert "Your workspace directory:" in config_arg.system_prompt
 
     def test_session_id_forwarded(self, tmp_path):
         factory = make_factory(tmp_path)

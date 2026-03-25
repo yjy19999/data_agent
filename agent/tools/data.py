@@ -1,7 +1,8 @@
 """
-ReadDataTool — reads structured data files and returns a bounded preview.
+ReadFormatTool — reads structured data files and returns a bounded preview.
+ReadDataTool   — reads structured data files with no truncation, using block navigation.
 
-Supported modes:
+Supported modes (both tools):
     json        single JSON value (object, array, or scalar)
     jsonl       newline-delimited JSON; each line is one of:
                   - plain JSON:    {"key": "value", ...}
@@ -189,8 +190,8 @@ def _parse_json(
 
 # ── Tool ───────────────────────────────────────────────────────────────────────
 
-class ReadDataTool(Tool):
-    name = "ReadData"
+class ReadFormatTool(Tool):
+    name = "ReadFormat"
     description = (
         "Read structured data files and return a bounded preview for inspection. "
         "Supports four modes: json, jsonl, json_gz, jsonl_gz. "
@@ -305,3 +306,205 @@ def _cap(lines: list[str], max_chars: int) -> str:
     if len(output) > max_chars:
         output = output[:max_chars] + f"\n\n[output truncated at {max_chars:,} chars]"
     return output
+
+
+# ── ReadDataTool helpers ────────────────────────────────────────────────────────
+
+def _split_blocks(text: str, block_size: int) -> list[str]:
+    """Split text into sequential chunks of block_size chars."""
+    if not text:
+        return [""]
+    return [text[i:i + block_size] for i in range(0, len(text), block_size)]
+
+
+def _sample_lines(lines: list[str], n: int = 5) -> list[tuple[int, str]]:
+    """Return up to n evenly-spaced (1-based line number, line text) pairs."""
+    if not lines:
+        return []
+    if len(lines) <= n:
+        return [(i + 1, line) for i, line in enumerate(lines)]
+    indices = [int(round(i * (len(lines) - 1) / (n - 1))) for i in range(n)]
+    seen: set[int] = set()
+    result = []
+    for idx in indices:
+        if idx not in seen:
+            seen.add(idx)
+            result.append((idx + 1, lines[idx]))
+    return result
+
+
+# ── Tool ───────────────────────────────────────────────────────────────────────
+
+class ReadDataTool(Tool):
+    name = "ReadData"
+    description = (
+        "Read structured data files with full content — no value truncation. "
+        "Large files and large JSONL lines are split into navigable blocks. "
+        "JSONL: call without args to see a sampled line index; then line=N to inspect "
+        "a line (shows block index if the line is large, or full content if it fits); "
+        "then line=N block=M to read a specific block of that line. "
+        "JSON: call without args to see a block index; then block=N to read a block."
+    )
+
+    def run(
+        self,
+        path: str,
+        mode: str,
+        line: int | None = None,
+        block: int | None = None,
+        block_size: int = 4000,
+        preview_chars: int = 100,
+    ) -> str:
+        """
+        Args:
+            path: Path to the data file (absolute or relative to cwd).
+            mode: File format — one of "json", "jsonl", "json_gz", "jsonl_gz".
+            line: JSONL only — 1-based line number to inspect.
+            block: Block number to read in full (1-based).
+            block_size: Characters per block. Defaults to 4000.
+            preview_chars: Characters shown per entry in the index. Defaults to 100.
+        """
+        if mode not in _VALID_MODES:
+            return (
+                f"[error] unknown mode {mode!r}. "
+                f"Valid modes: {', '.join(sorted(_VALID_MODES))}"
+            )
+
+        p = Path(path).expanduser()
+        if not p.exists():
+            return f"[error] file not found: {path}"
+        if not p.is_file():
+            return f"[error] not a file: {path}"
+
+        size_bytes = p.stat().st_size
+        compressed = mode.endswith("_gz")
+
+        try:
+            raw_text = _read_file_text(p, compressed)
+        except Exception as exc:
+            return f"[error] could not read file: {exc}"
+
+        base_mode = mode.removesuffix("_gz")
+
+        if base_mode == "jsonl":
+            return self._handle_jsonl(path, mode, raw_text, size_bytes, line, block, block_size, preview_chars)
+        else:
+            return self._handle_json(path, mode, raw_text, size_bytes, block, block_size, preview_chars)
+
+    # ── JSONL ──────────────────────────────────────────────────────────────────
+
+    def _handle_jsonl(
+        self,
+        path: str,
+        mode: str,
+        raw_text: str,
+        size_bytes: int,
+        line: int | None,
+        block: int | None,
+        block_size: int,
+        preview_chars: int,
+    ) -> str:
+        lines = [ln for ln in raw_text.splitlines() if ln.strip()]
+        total = len(lines)
+
+        if line is None:
+            # Level 1: sampled line index
+            sampled = _sample_lines(lines, n=5)
+            out = [
+                f"File:    {path}",
+                f"Mode:    {mode}",
+                f"Size:    {_human_size(size_bytes)}",
+                f"Lines:   {total:,}",
+                "",
+            ]
+            for lnum, ltext in sampled:
+                preview = ltext[:preview_chars].replace("\n", " ")
+                out.append(f"Line {lnum:<8} {preview}")
+            out += ["", "Use ReadData with line=N to inspect a specific line."]
+            return "\n".join(out)
+
+        if line < 1 or line > total:
+            return f"[error] line {line} out of range (file has {total:,} lines)"
+
+        line_text = lines[line - 1]
+        blocks = _split_blocks(line_text, block_size)
+
+        if block is None:
+            if len(blocks) == 1:
+                # Line fits in one block — return full content directly
+                return "\n".join([
+                    f"File:    {path}",
+                    f"Line:    {line} of {total:,}  ({len(line_text):,} chars)",
+                    "",
+                    line_text,
+                ])
+            # Level 2: block index for this line
+            header = f"Line:    {line} of {total:,}  ({len(line_text):,} chars)"
+            hint = f"line={line} block=N"
+            return self._render_block_index(path, header, blocks, preview_chars, hint)
+
+        # Level 3: read specific block of a line
+        header = f"Line:    {line} of {total:,}"
+        return self._render_block(path, header, blocks, block)
+
+    # ── JSON ───────────────────────────────────────────────────────────────────
+
+    def _handle_json(
+        self,
+        path: str,
+        mode: str,
+        raw_text: str,
+        size_bytes: int,
+        block: int | None,
+        block_size: int,
+        preview_chars: int,
+    ) -> str:
+        blocks = _split_blocks(raw_text, block_size)
+
+        if block is None:
+            header = f"Size:    {_human_size(size_bytes)}"
+            hint = "block=N"
+            return self._render_block_index(path, header, blocks, preview_chars, hint)
+
+        header = f"Size:    {_human_size(size_bytes)}"
+        return self._render_block(path, header, blocks, block)
+
+    # ── Shared renderers ───────────────────────────────────────────────────────
+
+    def _render_block_index(
+        self,
+        path: str,
+        header: str,
+        blocks: list[str],
+        preview_chars: int,
+        hint: str,
+    ) -> str:
+        out = [
+            f"File:    {path}",
+            header,
+            f"Blocks:  {len(blocks)}",
+            "",
+        ]
+        for i, b in enumerate(blocks, 1):
+            preview = b[:preview_chars].replace("\n", " ")
+            out.append(f"Block {i:<5} {preview}")
+        out += ["", f"Use ReadData with {hint} to read a block in full."]
+        return "\n".join(out)
+
+    def _render_block(
+        self,
+        path: str,
+        header: str,
+        blocks: list[str],
+        block: int,
+    ) -> str:
+        total = len(blocks)
+        if block < 1 or block > total:
+            return f"[error] block {block} out of range (has {total} block(s))"
+        return "\n".join([
+            f"File:    {path}",
+            header,
+            f"Block:   {block} of {total}",
+            "",
+            blocks[block - 1],
+        ])
