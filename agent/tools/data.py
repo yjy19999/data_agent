@@ -370,6 +370,17 @@ class ReadDataTool(Tool):
                 f"Valid modes: {', '.join(sorted(_VALID_MODES))}"
             )
 
+        # Coerce numeric args to int — LLMs sometimes pass them as strings
+        try:
+            if line is not None:
+                line = int(line)
+            if block is not None:
+                block = int(block)
+            block_size = int(block_size)
+            preview_chars = int(preview_chars)
+        except (ValueError, TypeError) as exc:
+            return f"[error] numeric arguments must be integers: {exc}"
+
         p = Path(path).expanduser()
         if not p.exists():
             return f"[error] file not found: {path}"
