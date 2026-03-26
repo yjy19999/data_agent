@@ -8,12 +8,35 @@ from typing import Any
 from .agent import Agent, TurnEvent
 from .data_quality_runner import (
     DataQualityRunner,
-    _QUALITY_INTRO_PROMPT,
     _QUALITY_AGGREGATE_PROMPT,
     _read_jsonl_lines,
 )
 
 _DETAIL_BLOCK_SIZE = 4_000  # chars per block delivered to the agent
+
+_DETAIL_QUALITY_INTRO_PROMPT = """\
+You are now in Phase 2: Quality Assessment.
+Use `InputManifest.json`, `Schema.md`, and `Schema.json` for context.
+
+ALL data content will be delivered to you directly in this conversation as messages.
+Do NOT use any tools to read data files — do NOT call ReadData, ReadFormat, Read,
+Bash, or any other tool on .json / .jsonl / .json.gz / .jsonl.gz files.
+Every record and every block will arrive here automatically. Just read what is sent.
+
+As each record or block arrives, assess it against these six dimensions and note your findings.
+Do NOT write the final report yet — just accumulate observations.
+
+Dimensions:
+- completeness
+- consistency
+- executability_or_verifiability
+- signal_to_noise
+- safety_and_compliance
+- task_utility
+
+Scoring scale (used in the final report):
+  5 = strong  |  3 = mixed  |  1 = poor  |  0 = unusable / blocked
+"""
 
 
 def _split_blocks(content: str, block_size: int = _DETAIL_BLOCK_SIZE) -> list[str]:
@@ -50,7 +73,7 @@ class DataQualityDetailRunner(DataQualityRunner):
         files = manifest.get("files", [])
 
         # --- intro turn ---
-        yield from agent.run(_QUALITY_INTRO_PROMPT)
+        yield from agent.run(_DETAIL_QUALITY_INTRO_PROMPT)
 
         # --- JSONL: every line, every block ---
         for entry in files:
