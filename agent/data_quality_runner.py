@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import json
 import shutil
 import uuid
@@ -156,33 +157,20 @@ Write two files:
    }
 """
 
-_QUALITY_PROMPT = """\
-Use `InputManifest.json`, `Schema.md`, and `Schema.json`.
+# Sent once at the start of Phase 2.  No reading instructions — the runner
+# drives JSONL coverage in Python; the agent just notes quality observations.
+_QUALITY_INTRO_PROMPT = """\
+You are now in Phase 2: Quality Assessment.
+Use `InputManifest.json`, `Schema.md`, and `Schema.json` for context.
 
-If you need to read file content for evidence, use the ReadData tool for .json/.jsonl/.json.gz/.jsonl.gz
-files. ReadData returns full content without truncation — call it without a block argument first to get
-the navigation index, then use line=N or block=N to read the content you need.
-Do NOT use ReadFormat, Read, or Bash/cat on those files.
+You will receive JSONL file content line-by-line directly in the conversation.
+For JSON / JSON.GZ files you will receive explicit instructions to read blocks via ReadData.
+Do NOT use ReadFormat, Read, or Bash/cat on any .json/.jsonl/.json.gz/.jsonl.gz file.
 
-MANDATORY reading coverage — you MUST do this for every .json/.jsonl/.json.gz/.jsonl.gz file:
+As content arrives, assess each record against these six dimensions and note your findings.
+Do NOT write the final report yet — just accumulate observations.
 
-For JSONL / JSONL.GZ files:
-  1. Call ReadData with no args to get the total line count and the line index.
-  2. Line coverage rules (based on total line count):
-       ≤ 20 lines   → read EVERY line (no sampling allowed).
-       21–100 lines → read every other line (lines 1, 3, 5, … plus the last line).
-       > 100 lines  → read at minimum 20 lines spread evenly across the file
-                      (first, last, and at least 18 evenly-spaced lines in between).
-  3. For each line selected above, call ReadData with line=N (no block) to get its block index.
-  4. For each line: read block 1 (first), the last block, and at least 1 middle block.
-     If the line fits in a single block, that one call is sufficient.
-
-For JSON / JSON.GZ files:
-  1. Call ReadData with no args to get the block index.
-  2. Read block 1 (first), the last block, and at least 3 blocks from the middle.
-     If the file has 5 or fewer blocks total, read all of them.
-
-Assess each file and the dataset overall against these six dimensions:
+Dimensions:
 - completeness
 - consistency
 - executability_or_verifiability
@@ -190,16 +178,15 @@ Assess each file and the dataset overall against these six dimensions:
 - safety_and_compliance
 - task_utility
 
-Scoring:
-- 5 = strong
-- 3 = mixed
-- 1 = poor
-- 0 = unusable / blocked
+Scoring scale (used in the final report):
+  5 = strong  |  3 = mixed  |  1 = poor  |  0 = unusable / blocked
+"""
 
-Write two files:
+# Sent after all content turns to produce the output files.
+_QUALITY_AGGREGATE_PROMPT = """\
+All content has now been delivered. Write the final quality report.
 
-1. `QualityReport.json`
-   Exact JSON shape:
+1. `QualityReport.json`  — exact JSON shape:
    {
      "overall_decision": "accept|review|reject",
      "overall_summary": "short summary",
@@ -231,6 +218,9 @@ Write two files:
    - What to keep, review, or reject
 """
 
+_JSONL_BATCH_SIZE = 10       # lines per agent turn
+_JSONL_LINE_PREVIEW = 2_000  # chars shown inline; longer lines get a ReadData hint
+
 _RESULTS_PROMPT = """\
 Use `InputManifest.json`, `Schema.json`, and `QualityReport.json`.
 
@@ -241,6 +231,19 @@ Write `GateDecision.md` with:
 - Follow-up actions
 - A compact checklist for downstream processing
 """
+
+
+def _read_jsonl_lines(path: str | Path) -> list[str]:
+    """Read every non-empty line from a jsonl or jsonl.gz file."""
+    p = Path(path)
+    open_fn = gzip.open if p.suffix == ".gz" else open
+    lines: list[str] = []
+    with open_fn(p, "rt", encoding="utf-8", errors="replace") as fh:
+        for raw in fh:
+            stripped = raw.strip()
+            if stripped:
+                lines.append(stripped)
+    return lines
 
 
 @dataclass
@@ -327,6 +330,80 @@ class DataQualityRunner:
             result.error = str(exc)
         return result
 
+    def _run_quality_phase(
+        self, agent: "Agent", manifest: dict[str, Any]
+    ) -> Iterator[TurnEvent]:
+        """
+        Phase 2 driver.
+
+        JSONL/JSONL.GZ — Python reads every line and delivers content to the agent
+        in batches of _JSONL_BATCH_SIZE.  Lines longer than _JSONL_LINE_PREVIEW chars
+        are shown truncated with a hint to use ReadData for the full content.
+
+        JSON/JSON.GZ — agent uses ReadData block navigation (no change).
+        """
+        jsonl_kinds = {"jsonl", "jsonl_gz"}
+        json_kinds = {"json", "json_gz"}
+        files = manifest.get("files", [])
+
+        # --- intro turn (dimensions, scoring, no reading instructions) ---
+        yield from agent.run(_QUALITY_INTRO_PROMPT)
+
+        # --- JSONL: code-enforced line-by-line coverage ---
+        for entry in files:
+            if entry.get("kind") not in jsonl_kinds:
+                continue
+            path = entry["path"]
+            filename = Path(path).name
+            lines = _read_jsonl_lines(path)
+            total = len(lines)
+
+            for batch_start in range(0, total, _JSONL_BATCH_SIZE):
+                batch = lines[batch_start : batch_start + _JSONL_BATCH_SIZE]
+                batch_end = batch_start + len(batch)
+                parts = [
+                    f"JSONL file: {filename}  "
+                    f"(lines {batch_start + 1}–{batch_end} of {total})\n"
+                ]
+                for i, line_content in enumerate(batch):
+                    lineno = batch_start + i + 1
+                    if len(line_content) > _JSONL_LINE_PREVIEW:
+                        preview = line_content[:_JSONL_LINE_PREVIEW]
+                        remaining = len(line_content) - _JSONL_LINE_PREVIEW
+                        hint = (
+                            f" … [{remaining:,} more chars — "
+                            f"use ReadData line={lineno} block=N for full content]"
+                        )
+                    else:
+                        preview = line_content
+                        hint = ""
+                    parts.append(f"Line {lineno}: {preview}{hint}")
+
+                batch_prompt = (
+                    "\n".join(parts)
+                    + "\n\nNote quality observations for each line above. "
+                    "Do NOT write the final report yet."
+                )
+                yield from agent.run(batch_prompt)
+
+        # --- JSON: agent uses ReadData blocks ---
+        for entry in files:
+            if entry.get("kind") not in json_kinds:
+                continue
+            path = entry["path"]
+            filename = Path(path).name
+            json_prompt = (
+                f"Now assess JSON file: {filename}\n"
+                "Use ReadData (no args) to get the block index, then read: "
+                "block 1, the last block, and at least 3 middle blocks "
+                "(read all blocks if there are 5 or fewer). "
+                "Note quality observations. Do NOT write the final report yet."
+            )
+            yield from agent.run(json_prompt)
+
+        # --- final aggregation ---
+        yield from agent.run(_QUALITY_AGGREGATE_PROMPT)
+
     def run_stream(
         self,
         inputs: Sequence[str | Path],
@@ -356,8 +433,7 @@ class DataQualityRunner:
         result.schema_files = self._existing_files("Schema.md", "Schema.json")
 
         yield TurnEvent(type="phase", data="quality_gate")
-        for event in agent.run(_QUALITY_PROMPT):
-            yield event
+        yield from self._run_quality_phase(agent, manifest)
         result.report_files = self._existing_files("QualityReport.json", "QualityReport.md")
 
         yield TurnEvent(type="phase", data="write_results")
