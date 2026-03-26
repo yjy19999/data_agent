@@ -167,10 +167,14 @@ Do NOT use ReadFormat, Read, or Bash/cat on those files.
 MANDATORY reading coverage — you MUST do this for every .json/.jsonl/.json.gz/.jsonl.gz file:
 
 For JSONL / JSONL.GZ files:
-  1. Call ReadData with no args to get the line index.
-  2. Select at least 5 lines spread across the file (e.g. first, ~25%, ~50%, ~75%, last).
-  3. For each selected line, call ReadData with line=N (no block) to get its block index.
-  4. Then for each line read at minimum: block 1 (first), the last block, and at least 1 middle block.
+  1. Call ReadData with no args to get the total line count and the line index.
+  2. Line coverage rules (based on total line count):
+       ≤ 20 lines   → read EVERY line (no sampling allowed).
+       21–100 lines → read every other line (lines 1, 3, 5, … plus the last line).
+       > 100 lines  → read at minimum 20 lines spread evenly across the file
+                      (first, last, and at least 18 evenly-spaced lines in between).
+  3. For each line selected above, call ReadData with line=N (no block) to get its block index.
+  4. For each line: read block 1 (first), the last block, and at least 1 middle block.
      If the line fits in a single block, that one call is sufficient.
 
 For JSON / JSON.GZ files:
