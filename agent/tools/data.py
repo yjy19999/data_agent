@@ -529,3 +529,115 @@ class ReadDataTool(Tool):
             "",
             blocks[block - 1],
         ])
+
+
+# ---------------------------------------------------------------------------
+# ReadBlockMemoryTool — reads ObservationLog.jsonl written by the detail runner
+# ---------------------------------------------------------------------------
+
+class ReadBlockMemoryTool(Tool):
+    name = "ReadBlockMemory"
+    description = (
+        "Read per-block quality observations from ObservationLog.jsonl. "
+        "Call with no range to get an index of all blocks. "
+        "Call with start_block / end_block to get full observations for a range."
+    )
+
+    def run(
+        self,
+        path: str,
+        start_block: int | None = None,
+        end_block:   int | None = None,
+    ) -> str:
+        """
+        Args:
+            path: Path to ObservationLog.jsonl.
+            start_block: First block number to return (1-based, inclusive). Omit for index mode.
+            end_block: Last block number to return (1-based, inclusive). Omit for index mode.
+        """
+        p = Path(path)
+        if not p.exists():
+            return f"[error] {path} not found"
+
+        entries: list[dict] = []
+        for raw in p.read_text(encoding="utf-8").splitlines():
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                entries.append(json.loads(raw))
+            except json.JSONDecodeError:
+                pass
+
+        if not entries:
+            return "[info] ObservationLog.jsonl is empty"
+
+        # Index mode — no range given
+        if start_block is None and end_block is None:
+            lines = [f"ObservationLog  ({len(entries)} blocks)\n"]
+            for e in entries:
+                preview = str(e.get("observation", ""))[:100].replace("\n", " ")
+                lines.append(
+                    f"  block {e.get('block', '?'):>4}  "
+                    f"[{e.get('source', '')}]  {preview}"
+                )
+            lines.append("\nUse start_block / end_block to read observations in full.")
+            return "\n".join(lines)
+
+        # Range mode
+        lo = int(start_block) if start_block is not None else 1
+        hi = int(end_block)   if end_block   is not None else lo
+        selected = [e for e in entries if lo <= int(e.get("block", 0)) <= hi]
+        if not selected:
+            return f"[info] no blocks found in range {lo}–{hi}"
+
+        parts = [f"ObservationLog  blocks {lo}–{hi}  ({len(selected)} entries)\n"]
+        for e in selected:
+            parts.append(
+                f"## block {e.get('block')}  [{e.get('source', '')}]\n"
+                f"{e.get('observation', '').strip()}\n"
+            )
+        return "\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# ReadBlockSummaryTool — reads ObservationSummary.json written by the agent
+# ---------------------------------------------------------------------------
+
+class ReadBlockSummaryTool(Tool):
+    name = "ReadBlockSummary"
+    description = (
+        "Read the consolidated observation summary from ObservationSummary.json. "
+        "Omit dimension to read the full summary. "
+        "Pass a dimension name to read just that dimension's findings."
+    )
+
+    def run(
+        self,
+        path: str,
+        dimension: str | None = None,
+    ) -> str:
+        """
+        Args:
+            path: Path to ObservationSummary.json.
+            dimension: Optional dimension name to filter
+                (completeness, consistency, executability_or_verifiability,
+                signal_to_noise, safety_and_compliance, task_utility).
+        """
+        p = Path(path)
+        if not p.exists():
+            return f"[error] {path} not found"
+
+        try:
+            summary = json.loads(p.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            return f"[error] failed to parse {path}: {exc}"
+
+        if dimension:
+            dims = summary.get("dimensions", {})
+            if dimension not in dims:
+                available = ", ".join(dims.keys()) or "(none)"
+                return f"[error] dimension '{dimension}' not found. Available: {available}"
+            return json.dumps({dimension: dims[dimension]}, indent=2)
+
+        return json.dumps(summary, indent=2)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gzip
+import json
 from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any
@@ -16,8 +17,8 @@ from .data_quality_runner import (
 _DETAIL_BLOCK_SIZE = 4_000       # chars per block delivered to the agent
 _CONSOLIDATION_INTERVAL = 50     # records between consolidation turns
 
-_OBSERVATION_LOG = "ObservationLog.md"
-_OBSERVATION_SUMMARY = "ObservationSummary.md"
+_OBSERVATION_LOG = "ObservationLog.jsonl"
+_OBSERVATION_SUMMARY = "ObservationSummary.json"
 
 _DETAIL_QUALITY_INTRO_PROMPT = """\
 You are now in Phase 2: Quality Assessment.
@@ -46,24 +47,40 @@ Scoring scale (used in the final report):
 _CONSOLIDATION_PROMPT = """\
 You have now assessed blocks 1–{n}.
 
-Update `{summary}` with a structured mid-run summary of your findings so far.
-For each of the six dimensions, note patterns, issues, and representative examples
-(cite ## block N labels).
+Write `{summary}` (overwrite if it exists) with a structured JSON summary of your
+findings so far. Use this exact schema:
 
-This file is your durable reference — be specific and thorough.
+{{
+  "as_of_block": {n},
+  "dimensions": {{
+    "completeness":                  {{"score_estimate": 0-5, "notes": "...", "evidence_blocks": [1, 3, ...]}},
+    "consistency":                   {{"score_estimate": 0-5, "notes": "...", "evidence_blocks": [...]}},
+    "executability_or_verifiability":{{"score_estimate": 0-5, "notes": "...", "evidence_blocks": [...]}},
+    "signal_to_noise":               {{"score_estimate": 0-5, "notes": "...", "evidence_blocks": [...]}},
+    "safety_and_compliance":         {{"score_estimate": 0-5, "notes": "...", "evidence_blocks": [...]}},
+    "task_utility":                  {{"score_estimate": 0-5, "notes": "...", "evidence_blocks": [...]}}
+  }}
+}}
+
+This file is your durable reference. Be specific — cite block numbers in evidence_blocks.
 Do NOT write the final QualityReport yet.
 """
 
 _DETAIL_AGGREGATE_PROMPT = """\
 All data blocks have been delivered.
 
-Read `{log}` and `{summary}` for the complete record of your per-block observations.
+Use ReadBlockMemory and ReadBlockSummary to review your full observation record:
+- ReadBlockMemory("{log}") — index of all blocks
+- ReadBlockMemory("{log}", start_block=N, end_block=M) — full text for a range
+- ReadBlockSummary("{summary}") — consolidated per-dimension summary
+- ReadBlockSummary("{summary}", dimension="completeness") — single dimension
+
 Using that evidence, produce the final output files:
 - `QualityReport.json`   — scores (0–5) for each of the six dimensions with evidence
 - `QualityReport.md`     — human-readable report with per-dimension commentary
 - `GateDecision.md`      — final verdict: ACCEPT / REVIEW / REJECT with rationale
 
-Every score must cite specific ## block N labels from your observation files.
+Every score must cite specific block numbers from your observation log.
 """
 
 
@@ -85,10 +102,16 @@ def _read_json_raw(path: str | Path) -> str:
     return p.read_text(encoding="utf-8", errors="replace")
 
 
-def _append_observation(log_path: Path, block_label: str, text: str) -> None:
-    """Append one block's agent response to ObservationLog.md."""
+def _append_observation(
+    log_path: Path,
+    block_num: int,
+    source: str,
+    observation: str,
+) -> None:
+    """Append one block's agent response as a JSONL entry to ObservationLog.jsonl."""
+    record = {"block": block_num, "source": source, "observation": observation.strip()}
     with log_path.open("a", encoding="utf-8") as fh:
-        fh.write(f"\n## {block_label}\n{text.strip()}\n")
+        fh.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +182,8 @@ class DataQualityDetailRunner(DataQualityRunner):
         agent: Agent,
         prompt: str,
         log_path: Path,
-        block_label: str,
+        block_num: int,
+        source: str,
     ) -> Iterator[TurnEvent]:
         """Run one agent turn, yield its events, and append its text to the log."""
         text_parts: list[str] = []
@@ -167,7 +191,7 @@ class DataQualityDetailRunner(DataQualityRunner):
             if event.type == "text":
                 text_parts.append(event.data)
             yield event
-        _append_observation(log_path, block_label, "".join(text_parts))
+        _append_observation(log_path, block_num, source, "".join(text_parts))
 
     def _consolidate(
         self,
@@ -197,7 +221,7 @@ class DataQualityDetailRunner(DataQualityRunner):
 
         log_path = self.workspace / _OBSERVATION_LOG
         # Start fresh each run
-        log_path.write_text(f"# Observation Log\n", encoding="utf-8")
+        log_path.write_text("", encoding="utf-8")
 
         # --- intro turn ---
         yield from agent.run(_DETAIL_QUALITY_INTRO_PROMPT)
@@ -230,13 +254,13 @@ class DataQualityDetailRunner(DataQualityRunner):
                 for block_idx, block_text in enumerate(blocks, start=1):
                     parts.append(f"--- block {block_idx}/{total_blocks} ---\n{block_text}")
 
-                block_label = f"block {block_count + 1}  [{filename} line {lineno}]"
+                source = f"{filename} line {lineno}/{total}"
                 prompt = (
                     "\n".join(parts)
                     + "\n\nNote quality observations for this record. "
                     "Do NOT write the final report yet."
                 )
-                yield from self._run_and_log(agent, prompt, log_path, block_label)
+                yield from self._run_and_log(agent, prompt, log_path, block_count + 1, source)
 
                 block_count += 1
                 if block_count % self.consolidation_interval == 0:
@@ -258,7 +282,7 @@ class DataQualityDetailRunner(DataQualityRunner):
                     data=f"[{filename}] sending block {file_block_idx}/{total_blocks}",
                 )
 
-                block_label = f"block {block_count + 1}  [{filename} block {file_block_idx}/{total_blocks}]"
+                source = f"{filename} block {file_block_idx}/{total_blocks}"
                 prompt = (
                     f"JSON file: {filename}  "
                     f"(block {file_block_idx} of {total_blocks})\n\n"
@@ -266,7 +290,7 @@ class DataQualityDetailRunner(DataQualityRunner):
                     "Note quality observations for this block. "
                     "Do NOT write the final report yet."
                 )
-                yield from self._run_and_log(agent, prompt, log_path, block_label)
+                yield from self._run_and_log(agent, prompt, log_path, block_count + 1, source)
 
                 block_count += 1
                 if block_count % self.consolidation_interval == 0:
