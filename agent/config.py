@@ -112,5 +112,8 @@ def build_system_prompt(tool_names: list[str]) -> str:
         "missing values for required parameters, ask the user to supply these values; "
         "otherwise proceed with the tool calls. If the user provides a specific value for "
         "a parameter (for example provided in quotes), make sure to use that value EXACTLY. "
-        "DO NOT make up values for or ask about optional parameters."
+        "DO NOT make up values for or ask about optional parameters.\n\n"
+        "Shell hints: when searching file contents prefer `rg` (ripgrep) over `grep` — "
+        "it is faster, supports regex by default, and respects .gitignore. "
+        "Fall back to `grep` only if `rg` is not available."
     )
