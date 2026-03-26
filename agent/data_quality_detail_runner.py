@@ -9,12 +9,15 @@ from .agent import Agent, TurnEvent
 from .data_quality_runner import (
     DataQualityRunner,
     DataQualityResult,
-    _QUALITY_AGGREGATE_PROMPT,
     _QualityProgressPrinter,
     _read_jsonl_lines,
 )
 
-_DETAIL_BLOCK_SIZE = 4_000  # chars per block delivered to the agent
+_DETAIL_BLOCK_SIZE = 4_000       # chars per block delivered to the agent
+_CONSOLIDATION_INTERVAL = 50     # records between consolidation turns
+
+_OBSERVATION_LOG = "ObservationLog.md"
+_OBSERVATION_SUMMARY = "ObservationSummary.md"
 
 _DETAIL_QUALITY_INTRO_PROMPT = """\
 You are now in Phase 2: Quality Assessment.
@@ -25,7 +28,7 @@ Do NOT use any tools to read data files — do NOT call ReadData, ReadFormat, Re
 Bash, or any other tool on .json / .jsonl / .json.gz / .jsonl.gz files.
 Every record and every block will arrive here automatically. Just read what is sent.
 
-As each record or block arrives, assess it against these six dimensions and note your findings.
+As each block arrives, assess it against these six dimensions and respond with brief notes.
 Do NOT write the final report yet — just accumulate observations.
 
 Dimensions:
@@ -40,6 +43,33 @@ Scoring scale (used in the final report):
   5 = strong  |  3 = mixed  |  1 = poor  |  0 = unusable / blocked
 """
 
+_CONSOLIDATION_PROMPT = """\
+You have now assessed blocks 1–{n}.
+
+Update `{summary}` with a structured mid-run summary of your findings so far.
+For each of the six dimensions, note patterns, issues, and representative examples
+(cite ## block N labels).
+
+This file is your durable reference — be specific and thorough.
+Do NOT write the final QualityReport yet.
+"""
+
+_DETAIL_AGGREGATE_PROMPT = """\
+All data blocks have been delivered.
+
+Read `{log}` and `{summary}` for the complete record of your per-block observations.
+Using that evidence, produce the final output files:
+- `QualityReport.json`   — scores (0–5) for each of the six dimensions with evidence
+- `QualityReport.md`     — human-readable report with per-dimension commentary
+- `GateDecision.md`      — final verdict: ACCEPT / REVIEW / REJECT with rationale
+
+Every score must cite specific ## block N labels from your observation files.
+"""
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def _split_blocks(content: str, block_size: int = _DETAIL_BLOCK_SIZE) -> list[str]:
     """Split a string into consecutive char-aligned blocks."""
@@ -55,12 +85,18 @@ def _read_json_raw(path: str | Path) -> str:
     return p.read_text(encoding="utf-8", errors="replace")
 
 
+def _append_observation(log_path: Path, block_label: str, text: str) -> None:
+    """Append one block's agent response to ObservationLog.md."""
+    with log_path.open("a", encoding="utf-8") as fh:
+        fh.write(f"\n## {block_label}\n{text.strip()}\n")
+
+
 # ---------------------------------------------------------------------------
 # Progress printer
 # ---------------------------------------------------------------------------
 
 class _DetailProgressPrinter(_QualityProgressPrinter):
-    """Extends the quality printer to show block-send progress events."""
+    """Extends the quality printer to show block-send and consolidation events."""
 
     def handle(self, event: TurnEvent) -> None:
         if event.type == "progress":
@@ -75,15 +111,21 @@ class _DetailProgressPrinter(_QualityProgressPrinter):
 
 class DataQualityDetailRunner(DataQualityRunner):
     """
-    Variant of DataQualityRunner that guarantees full block coverage.
+    Variant of DataQualityRunner that guarantees full block coverage and
+    maintains durable per-block observation memory.
 
-    - JSONL/JSONL.GZ: every line is read; each line's content is split into
-      blocks of _DETAIL_BLOCK_SIZE chars and every block is delivered to the agent.
-    - JSON/JSON.GZ: the raw file content is split into blocks and every block
-      is delivered to the agent.
-
-    No content is ever omitted or left to the agent's discretion.
+    - JSONL/JSONL.GZ: every line split into blocks; each block delivered as
+      a separate agent turn; agent response appended to ObservationLog.md.
+    - JSON/JSON.GZ: raw file split into blocks; same per-block delivery.
+    - Every `consolidation_interval` records Python injects a consolidation
+      turn so the agent writes a structured ObservationSummary.md.
+    - Final aggregation reads from ObservationLog.md + ObservationSummary.md
+      rather than relying on conversation history.
     """
+
+    def __init__(self, *args: Any, consolidation_interval: int = _CONSOLIDATION_INTERVAL, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.consolidation_interval = consolidation_interval
 
     def run(
         self,
@@ -92,7 +134,6 @@ class DataQualityDetailRunner(DataQualityRunner):
         focus: str = "",
         verbose: bool = True,
     ) -> DataQualityResult:
-        """Override to use _DetailProgressPrinter instead of _QualityProgressPrinter."""
         from .data_quality_runner import _DEFAULT_FOCUS
         printer = _DetailProgressPrinter() if verbose else None
         result = DataQualityResult(inputs=[str(Path(item)) for item in inputs])
@@ -109,27 +150,71 @@ class DataQualityDetailRunner(DataQualityRunner):
             result.error = str(exc)
         return result
 
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _run_and_log(
+        self,
+        agent: Agent,
+        prompt: str,
+        log_path: Path,
+        block_label: str,
+    ) -> Iterator[TurnEvent]:
+        """Run one agent turn, yield its events, and append its text to the log."""
+        text_parts: list[str] = []
+        for event in agent.run(prompt):
+            if event.type == "text":
+                text_parts.append(event.data)
+            yield event
+        _append_observation(log_path, block_label, "".join(text_parts))
+
+    def _consolidate(
+        self,
+        agent: Agent,
+        block_count: int,
+    ) -> Iterator[TurnEvent]:
+        prompt = _CONSOLIDATION_PROMPT.format(
+            n=block_count,
+            summary=_OBSERVATION_SUMMARY,
+        )
+        yield TurnEvent(
+            type="progress",
+            data=f"consolidating observations after block {block_count} → {_OBSERVATION_SUMMARY}",
+        )
+        yield from agent.run(prompt)
+
+    # ------------------------------------------------------------------
+    # Phase override
+    # ------------------------------------------------------------------
+
     def _run_quality_phase(
-        self, agent: "Agent", manifest: dict[str, Any]
+        self, agent: Agent, manifest: dict[str, Any]
     ) -> Iterator[TurnEvent]:
         jsonl_kinds = {"jsonl", "jsonl_gz"}
-        json_kinds = {"json", "json_gz"}
+        json_kinds  = {"json",  "json_gz"}
         files = manifest.get("files", [])
+
+        log_path = self.workspace / _OBSERVATION_LOG
+        # Start fresh each run
+        log_path.write_text(f"# Observation Log\n", encoding="utf-8")
 
         # --- intro turn ---
         yield from agent.run(_DETAIL_QUALITY_INTRO_PROMPT)
+
+        block_count = 0  # tracks delivered blocks across all files for consolidation
 
         # --- JSONL: every line, every block ---
         for entry in files:
             if entry.get("kind") not in jsonl_kinds:
                 continue
-            path = entry["path"]
+            path     = entry["path"]
             filename = Path(path).name
-            lines = _read_jsonl_lines(path)
-            total = len(lines)
+            lines    = _read_jsonl_lines(path)
+            total    = len(lines)
 
             for lineno, line_content in enumerate(lines, start=1):
-                blocks = _split_blocks(line_content, _DETAIL_BLOCK_SIZE)
+                blocks       = _split_blocks(line_content, _DETAIL_BLOCK_SIZE)
                 total_blocks = len(blocks)
 
                 yield TurnEvent(
@@ -140,44 +225,57 @@ class DataQualityDetailRunner(DataQualityRunner):
 
                 parts = [
                     f"JSONL file: {filename}  "
-                    f"(line {lineno} of {total},  {total_blocks} block(s))\n"
+                    f"(line {lineno} of {total}, {total_blocks} block(s))\n"
                 ]
                 for block_idx, block_text in enumerate(blocks, start=1):
-                    parts.append(
-                        f"--- block {block_idx}/{total_blocks} ---\n{block_text}"
-                    )
+                    parts.append(f"--- block {block_idx}/{total_blocks} ---\n{block_text}")
 
+                block_label = f"block {block_count + 1}  [{filename} line {lineno}]"
                 prompt = (
                     "\n".join(parts)
                     + "\n\nNote quality observations for this record. "
                     "Do NOT write the final report yet."
                 )
-                yield from agent.run(prompt)
+                yield from self._run_and_log(agent, prompt, log_path, block_label)
+
+                block_count += 1
+                if block_count % self.consolidation_interval == 0:
+                    yield from self._consolidate(agent, block_count)
 
         # --- JSON: every block of the raw file ---
         for entry in files:
             if entry.get("kind") not in json_kinds:
                 continue
-            path = entry["path"]
-            filename = Path(path).name
-            raw = _read_json_raw(path)
-            blocks = _split_blocks(raw, _DETAIL_BLOCK_SIZE)
+            path         = entry["path"]
+            filename     = Path(path).name
+            raw          = _read_json_raw(path)
+            blocks       = _split_blocks(raw, _DETAIL_BLOCK_SIZE)
             total_blocks = len(blocks)
 
-            for block_idx, block_text in enumerate(blocks, start=1):
+            for file_block_idx, block_text in enumerate(blocks, start=1):
                 yield TurnEvent(
                     type="progress",
-                    data=f"[{filename}] sending block {block_idx}/{total_blocks}",
+                    data=f"[{filename}] sending block {file_block_idx}/{total_blocks}",
                 )
 
+                block_label = f"block {block_count + 1}  [{filename} block {file_block_idx}/{total_blocks}]"
                 prompt = (
                     f"JSON file: {filename}  "
-                    f"(block {block_idx} of {total_blocks})\n\n"
+                    f"(block {file_block_idx} of {total_blocks})\n\n"
                     f"{block_text}\n\n"
                     "Note quality observations for this block. "
                     "Do NOT write the final report yet."
                 )
-                yield from agent.run(prompt)
+                yield from self._run_and_log(agent, prompt, log_path, block_label)
+
+                block_count += 1
+                if block_count % self.consolidation_interval == 0:
+                    yield from self._consolidate(agent, block_count)
 
         # --- final aggregation ---
-        yield from agent.run(_QUALITY_AGGREGATE_PROMPT)
+        yield from agent.run(
+            _DETAIL_AGGREGATE_PROMPT.format(
+                log=_OBSERVATION_LOG,
+                summary=_OBSERVATION_SUMMARY,
+            )
+        )
