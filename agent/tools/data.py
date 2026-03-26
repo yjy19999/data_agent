@@ -59,7 +59,9 @@ def _truncate_values(obj: Any, max_chars: int = _MAX_VALUE_CHARS) -> Any:
     Recursively truncate string values within a parsed JSON object.
 
     Rules:
-        str   → replaced with "[truncated: N chars]" when len > max_chars
+        str   → if len > max_chars, first try to parse as nested JSON;
+                if it parses as a dict/list, return that structure truncated
+                recursively; otherwise replace with "[truncated: N chars]"
         dict  → each value truncated recursively
         list  → each element truncated; tail summarised if > _MAX_LIST_ITEMS items
         other → returned unchanged (int, float, bool, None)
@@ -69,6 +71,14 @@ def _truncate_values(obj: Any, max_chars: int = _MAX_VALUE_CHARS) -> Any:
     """
     if isinstance(obj, str):
         if len(obj) > max_chars:
+            stripped = obj.strip()
+            if stripped and stripped[0] in ('{', '['):
+                try:
+                    nested = json.loads(stripped)
+                    if isinstance(nested, (dict, list)):
+                        return _truncate_values(nested, max_chars)
+                except json.JSONDecodeError:
+                    pass
             return f"[truncated: {len(obj):,} chars]"
         return obj
     if isinstance(obj, dict):
