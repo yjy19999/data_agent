@@ -94,6 +94,7 @@ class SessionMetrics:
     session_start_time: datetime = field(default_factory=datetime.now)
     models: dict[str, ModelMetrics] = field(default_factory=dict)
     tools: ToolMetrics = field(default_factory=ToolMetrics)
+    last_input_tokens: int = 0  # input tokens from the most recent API call (= current context window fill)
 
     def get_or_create_model(self, model_name: str) -> ModelMetrics:
         """Get or create metrics for a model."""
@@ -105,6 +106,8 @@ class SessionMetrics:
         """Record an API response."""
         model = self.get_or_create_model(model_name)
         model.add_response(tokens, latency_ms)
+        if tokens.input_tokens:
+            self.last_input_tokens = tokens.input_tokens
 
     def add_tool_call(self, name: str, success: bool, duration_ms: float) -> None:
         """Record a tool call."""

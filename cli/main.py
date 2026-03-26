@@ -120,10 +120,17 @@ def _shorten_path(path: Path, max_width: int) -> str:
 
 
 def _make_status_line(agent: "Agent", elapsed: float | None = None) -> str:
-    """Single status line: path on the left, optional ⏱ timer centered, tokens on the right."""
+    """Single status line: path on the left, optional ⏱ timer centered, tokens + ctx on the right."""
     cols = shutil.get_terminal_size((80, 24)).columns
     total = agent.metrics.get_summary().get("total_tokens", 0)
-    right = f" tokens: {total:,} " if total else " tokens: — "
+    ctx_used = agent.metrics.last_input_tokens
+    ctx_limit = agent.config.context_limit
+    compress_at = int(ctx_limit * agent.config.compression_threshold)
+    limit_k = f"{ctx_limit // 1000}k"
+    compress_k = f"{compress_at // 1000}k"
+    ctx_str = f"ctx: {ctx_used:,} / {limit_k} [compress @{compress_k}]" if ctx_used else f"ctx: — / {limit_k} [compress @{compress_k}]"
+    tokens_str = f"{total:,}" if total else "—"
+    right = f" tokens: {tokens_str}  {ctx_str} "
 
     if elapsed is not None:
         mid = f" ⏱  {elapsed:.1f}s "
