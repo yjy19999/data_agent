@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import gzip
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
 from .agent import Agent, TurnEvent
 from .data_quality_runner import (
     DataQualityRunner,
+    DataQualityResult,
     _QUALITY_AGGREGATE_PROMPT,
+    _QualityProgressPrinter,
     _read_jsonl_lines,
 )
 
@@ -53,6 +55,24 @@ def _read_json_raw(path: str | Path) -> str:
     return p.read_text(encoding="utf-8", errors="replace")
 
 
+# ---------------------------------------------------------------------------
+# Progress printer
+# ---------------------------------------------------------------------------
+
+class _DetailProgressPrinter(_QualityProgressPrinter):
+    """Extends the quality printer to show block-send progress events."""
+
+    def handle(self, event: TurnEvent) -> None:
+        if event.type == "progress":
+            self._console.print(f"  [dim cyan]{event.data}[/]")
+        else:
+            super().handle(event)
+
+
+# ---------------------------------------------------------------------------
+# Runner
+# ---------------------------------------------------------------------------
+
 class DataQualityDetailRunner(DataQualityRunner):
     """
     Variant of DataQualityRunner that guarantees full block coverage.
@@ -64,6 +84,30 @@ class DataQualityDetailRunner(DataQualityRunner):
 
     No content is ever omitted or left to the agent's discretion.
     """
+
+    def run(
+        self,
+        inputs: Sequence[str | Path],
+        *,
+        focus: str = "",
+        verbose: bool = True,
+    ) -> DataQualityResult:
+        """Override to use _DetailProgressPrinter instead of _QualityProgressPrinter."""
+        from .data_quality_runner import _DEFAULT_FOCUS
+        printer = _DetailProgressPrinter() if verbose else None
+        result = DataQualityResult(inputs=[str(Path(item)) for item in inputs])
+        try:
+            for event in self.run_stream(inputs, focus=focus or _DEFAULT_FOCUS):
+                if printer:
+                    printer.handle(event)
+                if event.type == "result":
+                    return event.data
+        except Exception as exc:
+            if printer:
+                printer.error(str(exc))
+            result.status = "error"
+            result.error = str(exc)
+        return result
 
     def _run_quality_phase(
         self, agent: "Agent", manifest: dict[str, Any]
@@ -87,6 +131,12 @@ class DataQualityDetailRunner(DataQualityRunner):
             for lineno, line_content in enumerate(lines, start=1):
                 blocks = _split_blocks(line_content, _DETAIL_BLOCK_SIZE)
                 total_blocks = len(blocks)
+
+                yield TurnEvent(
+                    type="progress",
+                    data=f"[{filename}] sending line {lineno}/{total} "
+                         f"({total_blocks} block{'s' if total_blocks > 1 else ''})",
+                )
 
                 parts = [
                     f"JSONL file: {filename}  "
@@ -115,6 +165,11 @@ class DataQualityDetailRunner(DataQualityRunner):
             total_blocks = len(blocks)
 
             for block_idx, block_text in enumerate(blocks, start=1):
+                yield TurnEvent(
+                    type="progress",
+                    data=f"[{filename}] sending block {block_idx}/{total_blocks}",
+                )
+
                 prompt = (
                     f"JSON file: {filename}  "
                     f"(block {block_idx} of {total_blocks})\n\n"
