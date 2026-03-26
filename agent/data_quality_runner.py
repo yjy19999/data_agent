@@ -164,6 +164,20 @@ files. ReadData returns full content without truncation — call it without a bl
 the navigation index, then use line=N or block=N to read the content you need.
 Do NOT use ReadFormat, Read, or Bash/cat on those files.
 
+MANDATORY reading coverage — you MUST do this for every .json/.jsonl/.json.gz/.jsonl.gz file:
+
+For JSONL / JSONL.GZ files:
+  1. Call ReadData with no args to get the line index.
+  2. Select at least 5 lines spread across the file (e.g. first, ~25%, ~50%, ~75%, last).
+  3. For each selected line, call ReadData with line=N (no block) to get its block index.
+  4. Then for each line read at minimum: block 1 (first), the last block, and at least 1 middle block.
+     If the line fits in a single block, that one call is sufficient.
+
+For JSON / JSON.GZ files:
+  1. Call ReadData with no args to get the block index.
+  2. Read block 1 (first), the last block, and at least 3 blocks from the middle.
+     If the file has 5 or fewer blocks total, read all of them.
+
 Assess each file and the dataset overall against these six dimensions:
 - completeness
 - consistency

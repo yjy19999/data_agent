@@ -353,7 +353,7 @@ class ReadDataTool(Tool):
         line: int | None = None,
         block: int | None = None,
         block_size: int = 4000,
-        preview_chars: int = 100,
+        preview_chars: int = 500,
     ) -> str:
         """
         Args:
@@ -362,7 +362,7 @@ class ReadDataTool(Tool):
             line: JSONL only — 1-based line number to inspect.
             block: Block number to read in full (1-based).
             block_size: Characters per block. Defaults to 4000.
-            preview_chars: Characters shown per entry in the index. Defaults to 100.
+            preview_chars: Characters shown per entry in the index. Defaults to 500.
         """
         if mode not in _VALID_MODES:
             return (
