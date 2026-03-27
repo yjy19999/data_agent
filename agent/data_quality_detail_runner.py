@@ -24,24 +24,35 @@ _DETAIL_QUALITY_INTRO_PROMPT = """\
 You are now in Phase 2: Quality Assessment.
 Use `InputManifest.json`, `Schema.md`, and `Schema.json` for context.
 
-ALL data content will be delivered to you directly in this conversation as messages.
-Do NOT use any tools to read data files — do NOT call ReadData, ReadFormat, Read,
-Bash, or any other tool on .json / .jsonl / .json.gz / .jsonl.gz files.
-Every record and every block will arrive here automatically. Just read what is sent.
+ALL data content will be delivered to you directly as messages — do NOT call ReadData,
+ReadFormat, Read, Bash, or any other tool to read data files.
 
-As each block arrives, assess it against these six dimensions and respond with brief notes.
-Do NOT write the final report yet — just accumulate observations.
+For EVERY block you receive you MUST do two things:
+1. Reply with a detailed assessment covering all six dimensions (do not skip any).
+2. Use the Edit tool to APPEND your assessment to `BlockObservations.md` in this format:
 
-Dimensions:
-- completeness
-- consistency
-- executability_or_verifiability
-- signal_to_noise
-- safety_and_compliance
-- task_utility
+## block N  [source info]
+- completeness: ...
+- consistency: ...
+- executability_or_verifiability: ...
+- signal_to_noise: ...
+- safety_and_compliance: ...
+- task_utility: ...
+Overall: brief summary sentence.
+
+If `BlockObservations.md` does not exist yet, create it with Write.
+Do NOT write the final QualityReport yet.
 
 Scoring scale (used in the final report):
   5 = strong  |  3 = mixed  |  1 = poor  |  0 = unusable / blocked
+
+Dimensions:
+- completeness              — missing fields, null rates
+- consistency               — format/type uniformity across records
+- executability_or_verifiability — can outputs be validated?
+- signal_to_noise           — ratio of useful content to boilerplate
+- safety_and_compliance     — PII, harmful content, licence issues
+- task_utility              — fitness for intended downstream task
 """
 
 _CONSOLIDATION_PROMPT = """\
@@ -69,18 +80,18 @@ Do NOT write the final QualityReport yet.
 _DETAIL_AGGREGATE_PROMPT = """\
 All data blocks have been delivered.
 
-Use ReadBlockMemory and ReadBlockSummary to review your full observation record:
-- ReadBlockMemory("{log}") — index of all blocks
+Review your full observation record using these tools:
+- Read `BlockObservations.md`  — your per-block assessments written during inspection
+- ReadBlockMemory("{log}")     — index of all blocks captured by the system
 - ReadBlockMemory("{log}", start_block=N, end_block=M) — full text for a range
-- ReadBlockSummary("{summary}") — consolidated per-dimension summary
-- ReadBlockSummary("{summary}", dimension="completeness") — single dimension
+- ReadBlockSummary("{summary}") — consolidated per-dimension summary (if written)
 
 Using that evidence, produce the final output files:
 - `QualityReport.json`   — scores (0–5) for each of the six dimensions with evidence
 - `QualityReport.md`     — human-readable report with per-dimension commentary
 - `GateDecision.md`      — final verdict: ACCEPT / REVIEW / REJECT with rationale
 
-Every score must cite specific block numbers from your observation log.
+Every score must cite specific ## block N labels from BlockObservations.md.
 """
 
 
@@ -257,8 +268,9 @@ class DataQualityDetailRunner(DataQualityRunner):
                 source = f"{filename} line {lineno}/{total}"
                 prompt = (
                     "\n".join(parts)
-                    + "\n\nNote quality observations for this record. "
-                    "Do NOT write the final report yet."
+                    + f"\n\nAssess this record across all six dimensions and append your "
+                    f"findings to `BlockObservations.md` as ## block {block_count + 1}. "
+                    "Do NOT write the final QualityReport yet."
                 )
                 yield from self._run_and_log(agent, prompt, log_path, block_count + 1, source)
 
@@ -287,8 +299,9 @@ class DataQualityDetailRunner(DataQualityRunner):
                     f"JSON file: {filename}  "
                     f"(block {file_block_idx} of {total_blocks})\n\n"
                     f"{block_text}\n\n"
-                    "Note quality observations for this block. "
-                    "Do NOT write the final report yet."
+                    f"Assess this block across all six dimensions and append your "
+                    f"findings to `BlockObservations.md` as ## block {block_count + 1}. "
+                    "Do NOT write the final QualityReport yet."
                 )
                 yield from self._run_and_log(agent, prompt, log_path, block_count + 1, source)
 
