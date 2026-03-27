@@ -14,7 +14,7 @@ from .data_quality_runner import (
     _read_jsonl_lines,
 )
 
-_DETAIL_BLOCK_SIZE = 4_000       # chars per block delivered to the agent
+_DETAIL_BLOCK_SIZE = 40_000      # chars per block delivered to the agent
 _CONSOLIDATION_INTERVAL = 50     # records between consolidation turns
 
 _OBSERVATION_LOG = "ObservationLog.jsonl"
