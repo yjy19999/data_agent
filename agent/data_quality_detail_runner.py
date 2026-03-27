@@ -259,28 +259,38 @@ class DataQualityDetailRunner(DataQualityRunner):
             for lineno, line_content in enumerate(lines, start=1):
                 blocks       = _split_blocks(line_content, _DETAIL_BLOCK_SIZE)
                 total_blocks = len(blocks)
+                source       = f"{filename} line {lineno}/{total}"
 
-                yield TurnEvent(
-                    type="progress",
-                    data=f"[{filename}] sending line {lineno}/{total} "
-                         f"({total_blocks} block{'s' if total_blocks > 1 else ''})",
-                )
-
-                parts = [
-                    f"JSONL file: {filename}  "
-                    f"(line {lineno} of {total}, {total_blocks} block(s))\n"
-                ]
                 for block_idx, block_text in enumerate(blocks, start=1):
-                    parts.append(f"--- block {block_idx}/{total_blocks} ---\n{block_text}")
+                    is_last = block_idx == total_blocks
 
-                source = f"{filename} line {lineno}/{total}"
-                prompt = (
-                    "\n".join(parts)
-                    + f"\n\nAssess this record across all six dimensions. "
-                    f"This is block {block_count + 1}. "
-                    "Do NOT write the final QualityReport yet."
-                )
-                yield from self._run_and_log(agent, prompt, log_path, block_count + 1, source)
+                    yield TurnEvent(
+                        type="progress",
+                        data=f"[{filename}] line {lineno}/{total}  "
+                             f"block {block_idx}/{total_blocks}",
+                    )
+
+                    header = (
+                        f"JSONL file: {filename}  "
+                        f"(line {lineno}/{total}, block {block_idx}/{total_blocks})\n\n"
+                        f"{block_text}\n\n"
+                    )
+
+                    if is_last:
+                        prompt = (
+                            header
+                            + f"This is the final block of this record (global block {block_count + 1}). "
+                            "Assess this complete record across all six dimensions. "
+                            "Do NOT write the final QualityReport yet."
+                        )
+                        yield from self._run_and_log(agent, prompt, log_path, block_count + 1, source)
+                    else:
+                        prompt = (
+                            header
+                            + f"This is block {block_idx}/{total_blocks} of this record — "
+                            "more blocks follow. Read and retain this content. Do not assess yet."
+                        )
+                        yield from agent.run(prompt)
 
                 block_count += 1
                 if block_count % self.consolidation_interval == 0:
