@@ -24,14 +24,15 @@ _DETAIL_QUALITY_INTRO_PROMPT = """\
 You are now in Phase 2: Quality Assessment.
 Use `InputManifest.json`, `Schema.md`, and `Schema.json` for context.
 
-ALL data content will be delivered to you directly as messages — do NOT call ReadData,
-ReadFormat, Read, Bash, or any other tool to read data files.
+ALL data content will be delivered to you block by block as messages.
+Do NOT call ReadData, ReadFormat, Read, or any tool to read data files — the data
+comes to you directly.
 
-For EVERY block you receive you MUST do two things:
-1. Reply with a detailed assessment covering all six dimensions (do not skip any).
-2. Use the Edit tool to APPEND your assessment to `BlockObservations.md` in this format:
+For EVERY block you receive, reply with a detailed assessment covering all six
+dimensions. Your response will be automatically saved — you do not need to call
+any write tool.
 
-## block N  [source info]
+Use this format in your reply:
 - completeness: ...
 - consistency: ...
 - executability_or_verifiability: ...
@@ -39,9 +40,6 @@ For EVERY block you receive you MUST do two things:
 - safety_and_compliance: ...
 - task_utility: ...
 Overall: brief summary sentence.
-
-If `BlockObservations.md` does not exist yet, create it with Write.
-Do NOT write the final QualityReport yet.
 
 Scoring scale (used in the final report):
   5 = strong  |  3 = mixed  |  1 = poor  |  0 = unusable / blocked
@@ -196,13 +194,21 @@ class DataQualityDetailRunner(DataQualityRunner):
         block_num: int,
         source: str,
     ) -> Iterator[TurnEvent]:
-        """Run one agent turn, yield its events, and append its text to the log."""
+        """Run one agent turn, yield events, and write the response to both log files."""
         text_parts: list[str] = []
         for event in agent.run(prompt):
             if event.type == "text":
                 text_parts.append(event.data)
             yield event
-        _append_observation(log_path, block_num, source, "".join(text_parts))
+        observation = "".join(text_parts).strip()
+
+        # Python writes ObservationLog.jsonl — no tool call required from agent
+        _append_observation(log_path, block_num, source, observation)
+
+        # Python also writes BlockObservations.md — agent just needs to reply with text
+        obs_md = log_path.parent / "BlockObservations.md"
+        with obs_md.open("a", encoding="utf-8") as fh:
+            fh.write(f"\n## block {block_num}  [{source}]\n{observation}\n")
 
     def _consolidate(
         self,
@@ -231,8 +237,10 @@ class DataQualityDetailRunner(DataQualityRunner):
         files = manifest.get("files", [])
 
         log_path = self.workspace / _OBSERVATION_LOG
+        obs_md   = self.workspace / "BlockObservations.md"
         # Start fresh each run
         log_path.write_text("", encoding="utf-8")
+        obs_md.write_text("# Block Observations\n", encoding="utf-8")
 
         # --- intro turn ---
         yield from agent.run(_DETAIL_QUALITY_INTRO_PROMPT)
@@ -268,8 +276,8 @@ class DataQualityDetailRunner(DataQualityRunner):
                 source = f"{filename} line {lineno}/{total}"
                 prompt = (
                     "\n".join(parts)
-                    + f"\n\nAssess this record across all six dimensions and append your "
-                    f"findings to `BlockObservations.md` as ## block {block_count + 1}. "
+                    + f"\n\nAssess this record across all six dimensions. "
+                    f"This is block {block_count + 1}. "
                     "Do NOT write the final QualityReport yet."
                 )
                 yield from self._run_and_log(agent, prompt, log_path, block_count + 1, source)
@@ -299,8 +307,8 @@ class DataQualityDetailRunner(DataQualityRunner):
                     f"JSON file: {filename}  "
                     f"(block {file_block_idx} of {total_blocks})\n\n"
                     f"{block_text}\n\n"
-                    f"Assess this block across all six dimensions and append your "
-                    f"findings to `BlockObservations.md` as ## block {block_count + 1}. "
+                    f"Assess this block across all six dimensions. "
+                    f"This is block {block_count + 1}. "
                     "Do NOT write the final QualityReport yet."
                 )
                 yield from self._run_and_log(agent, prompt, log_path, block_count + 1, source)
