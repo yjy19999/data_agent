@@ -263,6 +263,7 @@ class DataQualityDetailRunner(DataQualityRunner):
 
                 for block_idx, block_text in enumerate(blocks, start=1):
                     is_last = block_idx == total_blocks
+                    block_source = f"{filename} line {lineno}/{total} block {block_idx}/{total_blocks}"
 
                     yield TurnEvent(
                         type="progress",
@@ -280,21 +281,23 @@ class DataQualityDetailRunner(DataQualityRunner):
                         prompt = (
                             header
                             + f"This is the final block of this record (global block {block_count + 1}). "
-                            "Assess this complete record across all six dimensions. "
+                            "Write your observations for this block, then give a complete "
+                            "assessment of the full record across all six dimensions. "
                             "Do NOT write the final QualityReport yet."
                         )
-                        yield from self._run_and_log(agent, prompt, log_path, block_count + 1, source)
                     else:
                         prompt = (
                             header
-                            + f"This is block {block_idx}/{total_blocks} of this record — "
-                            "more blocks follow. Read and retain this content. Do not assess yet."
+                            + f"This is block {block_idx}/{total_blocks} of this record "
+                            f"(global block {block_count + 1}) — more blocks follow. "
+                            "Write your observations for this block. Do not give the final "
+                            "record assessment yet."
                         )
-                        yield from agent.run(prompt)
 
-                block_count += 1
-                if block_count % self.consolidation_interval == 0:
-                    yield from self._consolidate(agent, block_count)
+                    yield from self._run_and_log(agent, prompt, log_path, block_count + 1, block_source)
+                    block_count += 1
+                    if block_count % self.consolidation_interval == 0:
+                        yield from self._consolidate(agent, block_count)
 
         # --- JSON: every block of the raw file ---
         for entry in files:
