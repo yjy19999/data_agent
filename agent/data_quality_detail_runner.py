@@ -24,7 +24,7 @@ _DETAIL_QUALITY_INTRO_PROMPT = """\
 You are now in Phase 2: Quality Assessment.
 Use `InputManifest.json`, `Schema.md`, and `Schema.json` for context.
 
-ALL data content will be delivered to you block by block as messages.
+ALL data content will be delivered to you record by record as messages.
 Do NOT call ReadData, ReadFormat, Read, or any tool to read data files — the data
 comes to you directly. Your response will be automatically saved — you do not
 need to call any write tool.
@@ -37,74 +37,104 @@ need to call any write tool.
 - **JSON files**: the entire file is split into consecutive blocks. You will see
   `--- NEW FILE ---` markers at file boundaries.
 
-## What to write for each block
+## IMPORTANT: you are inspecting ONE record at a time
 
-- **Non-final block of a multi-block record**: note your observations for this
-  block only (fields seen, quality issues, anomalies). Do NOT score yet.
-- **Final (or only) block of a record**: write observations for this block, then
-  give a complete assessment of the **entire record** across all six dimensions.
-- **JSON file blocks**: each block is assessed independently across all six
-  dimensions.
+Each message contains one record (or one block of a large record).
+Your job is to write **concrete factual observations about THIS specific record**,
+NOT an overall quality report about the whole dataset.
 
-## Assessment format (for final/only blocks and JSON blocks)
+Do NOT summarise dataset-wide trends, do NOT give overall scores, and do NOT
+write the final QualityReport. Just describe what you see in THIS record.
 
-- completeness: ...
-- consistency: ...
-- executability_or_verifiability: ...
-- signal_to_noise: ...
-- safety_and_compliance: ...
-- task_utility: ...
-Overall: brief summary sentence.
+## What to write for each record
 
-Scoring scale (used in the final report):
-  5 = strong  |  3 = mixed  |  1 = poor  |  0 = unusable / blocked
+Answer these questions about the specific record you are looking at:
 
-Dimensions:
-- completeness              — missing fields, null rates
-- consistency               — format/type uniformity across records
-- executability_or_verifiability — can outputs be validated?
-- signal_to_noise           — ratio of useful content to boilerplate
-- safety_and_compliance     — PII, harmful content, licence issues
-- task_utility              — fitness for intended downstream task
+1. **Fields present / missing**: Which fields does this record have? Are any
+   expected fields (per Schema.json) missing or null?
+2. **Format anomalies**: Does this record's structure or field types match the
+   schema? Any unexpected types, extra fields, or malformed values?
+3. **Verifiability**: Can the content of this record be independently verified
+   or validated? Are there testable claims, executable code, or checkable references?
+4. **Useful content vs filler**: How much of this record is substantive content
+   vs boilerplate, placeholder text, or repetition?
+5. **Safety concerns**: Does this record contain PII, harmful content, toxic
+   language, or licence-problematic material? Cite specific fields/values.
+6. **Fitness for task**: Is this record useful for the intended downstream task?
+   What makes it good or bad as a training/evaluation example?
 
-Do NOT produce the final QualityReport yet — that comes after all data is delivered.
+## Format
+
+Write your observations as a short bulleted list. Be specific — quote field
+names and values. Example:
+
+- fields: has `instruction`, `response`, `metadata`; missing `source_id` (expected per schema)
+- format: `metadata.timestamp` is a string "yesterday" instead of ISO-8601
+- verifiability: `response` contains a code snippet that could be executed to verify
+- content: 80% substantive; `metadata.tags` is empty list (filler)
+- safety: no PII or harmful content detected
+- fitness: good example — clear instruction with detailed response
+
+For non-final blocks of a multi-block record, just note what fields/content you
+see in this block. The full record assessment comes on the final block.
 """
 
 _CONSOLIDATION_PROMPT = """\
-You have now assessed blocks 1–{n}.
+You have now inspected records across blocks 1–{n}.
 
-Write `{summary}` (overwrite if it exists) with a structured JSON summary of your
-findings so far. Use this exact schema:
+Review your per-record observations so far and aggregate them into patterns.
+Write `{summary}` (overwrite if it exists) with a structured JSON summary.
+
+NOW is the time to look across records and identify dataset-level patterns.
+Use this exact schema:
 
 {{
   "as_of_block": {n},
+  "records_inspected": <count>,
   "dimensions": {{
-    "completeness":                  {{"score_estimate": 0-5, "notes": "...", "evidence_blocks": [1, 3, ...]}},
-    "consistency":                   {{"score_estimate": 0-5, "notes": "...", "evidence_blocks": [...]}},
-    "executability_or_verifiability":{{"score_estimate": 0-5, "notes": "...", "evidence_blocks": [...]}},
-    "signal_to_noise":               {{"score_estimate": 0-5, "notes": "...", "evidence_blocks": [...]}},
-    "safety_and_compliance":         {{"score_estimate": 0-5, "notes": "...", "evidence_blocks": [...]}},
-    "task_utility":                  {{"score_estimate": 0-5, "notes": "...", "evidence_blocks": [...]}}
-  }}
+    "completeness":                  {{"score_estimate": 0-5, "notes": "which fields are commonly missing/null across records", "evidence_blocks": [1, 3, ...]}},
+    "consistency":                   {{"score_estimate": 0-5, "notes": "are records uniform in structure/types, or do they vary?", "evidence_blocks": [...]}},
+    "executability_or_verifiability":{{"score_estimate": 0-5, "notes": "can outputs generally be validated?", "evidence_blocks": [...]}},
+    "signal_to_noise":               {{"score_estimate": 0-5, "notes": "ratio of useful content to filler across records", "evidence_blocks": [...]}},
+    "safety_and_compliance":         {{"score_estimate": 0-5, "notes": "PII/harmful/licence issues found in any records", "evidence_blocks": [...]}},
+    "task_utility":                  {{"score_estimate": 0-5, "notes": "overall fitness of the inspected records for the task", "evidence_blocks": [...]}}
+  }},
+  "common_issues": ["issue 1 seen in N records", ...],
+  "notable_records": [{{"block": N, "reason": "..."}}]
 }}
 
-This file is your durable reference. Be specific — cite block numbers in evidence_blocks.
+Scoring scale: 5 = strong | 3 = mixed | 1 = poor | 0 = unusable.
+Be specific — cite block numbers. This is a checkpoint summary, not the final report.
 Do NOT write the final QualityReport yet.
 """
 
 _DETAIL_AGGREGATE_PROMPT = """\
-All data blocks have been delivered.
+All records have been delivered and inspected.
 
-Review your full observation record using these tools:
-- Read `BlockObservations.md`  — your per-block assessments written during inspection
+You wrote per-record factual observations during inspection. Now aggregate those
+observations into a dataset-level quality report.
+
+Review your observation record using these tools:
+- Read `BlockObservations.md`  — your per-record observations written during inspection
 - ReadBlockMemory("{log}")     — index of all blocks captured by the system
 - ReadBlockMemory("{log}", start_block=N, end_block=M) — full text for a range
-- ReadBlockSummary("{summary}") — consolidated per-dimension summary (if written)
+- ReadBlockSummary("{summary}") — consolidated checkpoint summary (if written)
 
 Using that evidence, produce the final output files:
-- `QualityReport.json`   — scores (0–5) for each of the six dimensions with evidence
-- `QualityReport.md`     — human-readable report with per-dimension commentary
-- `GateDecision.md`      — final verdict: ACCEPT / REVIEW / REJECT with rationale
+
+1. `QualityReport.json` — dataset-level scores (0–5) for each dimension:
+   - completeness: missing fields, null rates across all records
+   - consistency: format/type uniformity across records
+   - executability_or_verifiability: can outputs be validated?
+   - signal_to_noise: ratio of useful content to boilerplate
+   - safety_and_compliance: PII, harmful content, licence issues
+   - task_utility: fitness for intended downstream task
+   Each score must cite specific block numbers as evidence.
+
+2. `QualityReport.md` — human-readable report with per-dimension commentary,
+   referencing specific records/blocks that illustrate each finding.
+
+3. `GateDecision.md` — final verdict: ACCEPT / REVIEW / REJECT with rationale.
 
 Every score must cite specific ## block N labels from BlockObservations.md.
 """
@@ -321,27 +351,29 @@ class DataQualityDetailRunner(DataQualityRunner):
                                 header
                                 + f"This is the only block of record {lineno} "
                                 f"(global block {block_count + 1}). "
-                                "Write your observations and give a complete "
-                                "assessment of this record across all six dimensions. "
-                                "Do NOT write the final QualityReport yet."
+                                "Write your factual observations about THIS record: "
+                                "fields present/missing, format issues, verifiability, "
+                                "useful content vs filler, safety concerns, task fitness. "
+                                "Do NOT give an overall dataset summary or write the final QualityReport."
                             )
                         else:
                             prompt = (
                                 header
                                 + f"This is the final block of record {lineno} "
                                 f"(global block {block_count + 1}). "
-                                "Write your observations for this block, then give a complete "
-                                "assessment of this entire record (all blocks combined) "
-                                "across all six dimensions. "
-                                "Do NOT write the final QualityReport yet."
+                                "Now that you have seen all blocks of this record, write your "
+                                "factual observations about THIS complete record: "
+                                "fields present/missing, format issues, verifiability, "
+                                "useful content vs filler, safety concerns, task fitness. "
+                                "Do NOT give an overall dataset summary or write the final QualityReport."
                             )
                     else:
                         prompt = (
                             header
                             + f"This is block {block_idx}/{total_blocks} of record {lineno} "
                             f"(global block {block_count + 1}) — more blocks of this same "
-                            f"record follow. Write your observations for this block. "
-                            "Do not give the final record assessment yet."
+                            f"record follow. Note what fields and content you see in this "
+                            f"block. Do not assess the full record yet."
                         )
 
                     yield from self._run_and_log(agent, prompt, log_path, block_count + 1, block_source)
@@ -383,8 +415,10 @@ class DataQualityDetailRunner(DataQualityRunner):
                     f"{block_text}\n\n"
                     f"This is block {file_block_idx}/{total_blocks} of file `{filename}` "
                     f"(global block {block_count + 1}). "
-                    f"Assess this block across all six dimensions. "
-                    "Do NOT write the final QualityReport yet."
+                    "Write your factual observations about the content in this block: "
+                    "fields present/missing, format issues, verifiability, "
+                    "useful content vs filler, safety concerns, task fitness. "
+                    "Do NOT give an overall dataset summary or write the final QualityReport."
                 )
                 yield from self._run_and_log(agent, prompt, log_path, block_count + 1, source)
 
