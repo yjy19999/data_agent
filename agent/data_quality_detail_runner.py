@@ -26,13 +26,28 @@ Use `InputManifest.json`, `Schema.md`, and `Schema.json` for context.
 
 ALL data content will be delivered to you block by block as messages.
 Do NOT call ReadData, ReadFormat, Read, or any tool to read data files — the data
-comes to you directly.
+comes to you directly. Your response will be automatically saved — you do not
+need to call any write tool.
 
-For EVERY block you receive, reply with a detailed assessment covering all six
-dimensions. Your response will be automatically saved — you do not need to call
-any write tool.
+## How data is delivered
 
-Use this format in your reply:
+- **JSONL files**: each line is one independent data record. A large record may
+  be split across multiple blocks. You will see `--- NEW RECORD ---` markers
+  at record boundaries.
+- **JSON files**: the entire file is split into consecutive blocks. You will see
+  `--- NEW FILE ---` markers at file boundaries.
+
+## What to write for each block
+
+- **Non-final block of a multi-block record**: note your observations for this
+  block only (fields seen, quality issues, anomalies). Do NOT score yet.
+- **Final (or only) block of a record**: write observations for this block, then
+  give a complete assessment of the **entire record** across all six dimensions.
+- **JSON file blocks**: each block is assessed independently across all six
+  dimensions.
+
+## Assessment format (for final/only blocks and JSON blocks)
+
 - completeness: ...
 - consistency: ...
 - executability_or_verifiability: ...
@@ -51,6 +66,8 @@ Dimensions:
 - signal_to_noise           — ratio of useful content to boilerplate
 - safety_and_compliance     — PII, harmful content, licence issues
 - task_utility              — fitness for intended downstream task
+
+Do NOT produce the final QualityReport yet — that comes after all data is delivered.
 """
 
 _CONSOLIDATION_PROMPT = """\
@@ -247,6 +264,8 @@ class DataQualityDetailRunner(DataQualityRunner):
 
         block_count = 0  # tracks delivered blocks across all files for consolidation
 
+        prev_file: str | None = None   # track file transitions
+
         # --- JSONL: every line, every block ---
         for entry in files:
             if entry.get("kind") not in jsonl_kinds:
@@ -256,42 +275,73 @@ class DataQualityDetailRunner(DataQualityRunner):
             lines    = _read_jsonl_lines(path)
             total    = len(lines)
 
+            # ── file boundary ──
+            if filename != prev_file:
+                yield TurnEvent(type="progress", data=f"[{filename}] starting file")
+                yield from agent.run(
+                    f"--- NEW FILE ---\n"
+                    f"Now inspecting JSONL file: `{filename}` ({total} records).\n"
+                    f"Each record is an independent data item. "
+                    f"Blocks from different records are NOT related to each other."
+                )
+                prev_file = filename
+
             for lineno, line_content in enumerate(lines, start=1):
                 blocks       = _split_blocks(line_content, _DETAIL_BLOCK_SIZE)
                 total_blocks = len(blocks)
-                source       = f"{filename} line {lineno}/{total}"
 
                 for block_idx, block_text in enumerate(blocks, start=1):
                     is_last = block_idx == total_blocks
-                    block_source = f"{filename} line {lineno}/{total} block {block_idx}/{total_blocks}"
+                    block_source = f"{filename} record {lineno}/{total} block {block_idx}/{total_blocks}"
 
                     yield TurnEvent(
                         type="progress",
-                        data=f"[{filename}] line {lineno}/{total}  "
+                        data=f"[{filename}] record {lineno}/{total}  "
                              f"block {block_idx}/{total_blocks}",
                     )
 
+                    # ── record boundary on first block ──
+                    record_boundary = ""
+                    if block_idx == 1:
+                        record_boundary = (
+                            f"--- NEW RECORD (record {lineno}/{total} in `{filename}`) ---\n"
+                            f"This is a separate, independent record from any previous one.\n\n"
+                        )
+
                     header = (
-                        f"JSONL file: {filename}  "
-                        f"(line {lineno}/{total}, block {block_idx}/{total_blocks})\n\n"
+                        f"{record_boundary}"
+                        f"JSONL file: `{filename}` | record {lineno}/{total} | "
+                        f"block {block_idx}/{total_blocks}\n\n"
                         f"{block_text}\n\n"
                     )
 
                     if is_last:
-                        prompt = (
-                            header
-                            + f"This is the final block of this record (global block {block_count + 1}). "
-                            "Write your observations for this block, then give a complete "
-                            "assessment of the full record across all six dimensions. "
-                            "Do NOT write the final QualityReport yet."
-                        )
+                        if total_blocks == 1:
+                            prompt = (
+                                header
+                                + f"This is the only block of record {lineno} "
+                                f"(global block {block_count + 1}). "
+                                "Write your observations and give a complete "
+                                "assessment of this record across all six dimensions. "
+                                "Do NOT write the final QualityReport yet."
+                            )
+                        else:
+                            prompt = (
+                                header
+                                + f"This is the final block of record {lineno} "
+                                f"(global block {block_count + 1}). "
+                                "Write your observations for this block, then give a complete "
+                                "assessment of this entire record (all blocks combined) "
+                                "across all six dimensions. "
+                                "Do NOT write the final QualityReport yet."
+                            )
                     else:
                         prompt = (
                             header
-                            + f"This is block {block_idx}/{total_blocks} of this record "
-                            f"(global block {block_count + 1}) — more blocks follow. "
-                            "Write your observations for this block. Do not give the final "
-                            "record assessment yet."
+                            + f"This is block {block_idx}/{total_blocks} of record {lineno} "
+                            f"(global block {block_count + 1}) — more blocks of this same "
+                            f"record follow. Write your observations for this block. "
+                            "Do not give the final record assessment yet."
                         )
 
                     yield from self._run_and_log(agent, prompt, log_path, block_count + 1, block_source)
@@ -309,19 +359,31 @@ class DataQualityDetailRunner(DataQualityRunner):
             blocks       = _split_blocks(raw, _DETAIL_BLOCK_SIZE)
             total_blocks = len(blocks)
 
+            # ── file boundary ──
+            if filename != prev_file:
+                yield TurnEvent(type="progress", data=f"[{filename}] starting file")
+                yield from agent.run(
+                    f"--- NEW FILE ---\n"
+                    f"Now inspecting JSON file: `{filename}` "
+                    f"({total_blocks} block{'s' if total_blocks != 1 else ''}).\n"
+                    f"All blocks belong to this single file — they are consecutive "
+                    f"portions of the same JSON document."
+                )
+                prev_file = filename
+
             for file_block_idx, block_text in enumerate(blocks, start=1):
                 yield TurnEvent(
                     type="progress",
-                    data=f"[{filename}] sending block {file_block_idx}/{total_blocks}",
+                    data=f"[{filename}] block {file_block_idx}/{total_blocks}",
                 )
 
                 source = f"{filename} block {file_block_idx}/{total_blocks}"
                 prompt = (
-                    f"JSON file: {filename}  "
-                    f"(block {file_block_idx} of {total_blocks})\n\n"
+                    f"JSON file: `{filename}` | block {file_block_idx}/{total_blocks}\n\n"
                     f"{block_text}\n\n"
+                    f"This is block {file_block_idx}/{total_blocks} of file `{filename}` "
+                    f"(global block {block_count + 1}). "
                     f"Assess this block across all six dimensions. "
-                    f"This is block {block_count + 1}. "
                     "Do NOT write the final QualityReport yet."
                 )
                 yield from self._run_and_log(agent, prompt, log_path, block_count + 1, source)
