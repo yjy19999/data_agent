@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from .base import Tool, ToolRegistry
-from .data import ReadFormatTool, ReadDataTool, ReadBlockMemoryTool, ReadBlockSummaryTool
+from .data import ReadFormatTool, ReadDataTool, ReadBlockMemoryTool, ReadBlockSummaryTool, WriteScoreTool
 from .claude import (
     BashTool, EditTool, LSTool, ReadTool, WriteTool,
     GlobTool as _ClaudeGlob,
@@ -310,6 +310,7 @@ _PROFILES: dict[str, ToolProfile] = {
             ReadTool, EditTool, WriteTool,
             ReadFormatTool, ReadDataTool,
             ReadBlockMemoryTool, ReadBlockSummaryTool,
+            WriteScoreTool,
         ],
     ),
 

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
 from abc import ABC, abstractmethod
-from typing import Any, get_type_hints
+import types
+from typing import Any, Union, get_type_hints
 
 
 class Tool(ABC):
@@ -180,6 +182,15 @@ def _python_type_to_json(tp: Any) -> str:
         list: "array",
         dict: "object",
     }
+    # Handle Optional[X] / X | None (typing.Union or types.UnionType)
+    origin = getattr(tp, "__origin__", None)
+    args = getattr(tp, "__args__", None)
+    is_union = origin is Union or isinstance(tp, types.UnionType)
+    if args and is_union:
+        # Filter out NoneType to find the real type
+        real = [a for a in args if a is not type(None)]
+        if real:
+            return mapping.get(real[0], "string")
     return mapping.get(tp, "string")
 
 
@@ -205,10 +216,13 @@ def _extract_param_doc(docstring: str, param_name: str) -> str:
                 break
             if stripped.startswith(f"{param_name}:"):
                 desc = stripped[len(param_name) + 1:].strip()
-                # Collect continuation lines
+                # Collect continuation lines (stop at next param or section)
                 for cont in lines[i + 1:]:
                     c = cont.strip()
-                    if not c or c.endswith(":"):
+                    if not c:
+                        break
+                    # Stop if this looks like a new param "name:" or section heading
+                    if re.match(r'^[a-zA-Z_]\w*:', c):
                         break
                     desc += " " + c
                 return desc

@@ -1,8 +1,9 @@
 """
-ReadFormatTool — reads structured data files and returns a bounded preview.
-ReadDataTool   — reads structured data files with no truncation, using block navigation.
+ReadFormatTool  — reads structured data files and returns a bounded preview.
+ReadDataTool    — reads structured data files with no truncation, using block navigation.
+WriteScoreTool  — writes quality scores to data files.
 
-Supported modes (both tools):
+Supported modes (read tools):
     json        single JSON value (object, array, or scalar)
     jsonl       newline-delimited JSON; each line is one of:
                   - plain JSON:    {"key": "value", ...}
@@ -641,3 +642,156 @@ class ReadBlockSummaryTool(Tool):
             return json.dumps({dimension: dims[dimension]}, indent=2)
 
         return json.dumps(summary, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# WriteScoreTool — writes quality scores to data files
+# ---------------------------------------------------------------------------
+
+class WriteScoreTool(Tool):
+    name = "WriteScore"
+    description = (
+        "Write a quality score for a data record or file.\n"
+        "\n"
+        "For JSONL files: pass the source file path, line number (1-based), and a\n"
+        "score dict. The tool reads the original line, adds/updates a `trace_score`\n"
+        "field with your score, and writes the updated record to an output copy.\n"
+        "All other fields are preserved exactly as-is.\n"
+        "\n"
+        "For JSON files: pass the source file path (no line number) and a score dict.\n"
+        "The tool writes the score to `<output_dir>/<filename>_score.json`.\n"
+        "\n"
+        "The output directory defaults to `output/` next to the source file.\n"
+        "Call this tool once per record (JSONL) or once per file (JSON) as you\n"
+        "inspect each one."
+    )
+
+    def run(
+        self,
+        path: str,
+        score: str,
+        line: int | None = None,
+        output_dir: str | None = None,
+    ) -> str:
+        """Write quality score for a data record or file.
+
+        Args:
+            path: Path to the source data file (json, jsonl, json.gz, jsonl.gz).
+            score: JSON string with the quality score dict, e.g. '{"completeness": 4, "consistency": 5}'.
+            line: 1-based line number for JSONL files. Omit for JSON files.
+            output_dir: Output directory. Defaults to output/ next to the source file.
+        """
+        src = Path(path)
+        if not src.exists():
+            return f"[error] file not found: {path}"
+
+        # Parse the score
+        try:
+            score_obj = json.loads(score)
+        except json.JSONDecodeError as exc:
+            return f"[error] invalid score JSON: {exc}"
+
+        if not isinstance(score_obj, dict):
+            return "[error] score must be a JSON object (dict)"
+
+        # Determine file kind
+        name_lower = src.name.lower()
+        is_gz = name_lower.endswith(".gz")
+        if is_gz:
+            stem_lower = name_lower[:-3]
+        else:
+            stem_lower = name_lower
+
+        is_jsonl = stem_lower.endswith(".jsonl")
+        is_json = stem_lower.endswith(".json") and not is_jsonl
+
+        if not is_jsonl and not is_json:
+            return f"[error] unsupported file type: {src.name}. Expected .json, .jsonl, .json.gz, or .jsonl.gz"
+
+        # Resolve output directory
+        if output_dir:
+            out_dir = Path(output_dir)
+        else:
+            out_dir = src.parent / "output"
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        if is_json:
+            return self._write_json_score(src, score_obj, out_dir)
+        else:
+            if line is None:
+                return "[error] 'line' parameter is required for JSONL files (1-based line number)"
+            return self._write_jsonl_score(src, line, score_obj, out_dir, is_gz)
+
+    # -- JSON: write <name>_score.json to output dir --
+
+    def _write_json_score(
+        self, src: Path, score: dict, out_dir: Path
+    ) -> str:
+        # Build output filename: data.json -> data_score.json
+        stem = src.stem
+        if src.name.lower().endswith(".json.gz"):
+            stem = Path(stem).stem  # strip .json from .json.gz
+        out_path = out_dir / f"{stem}_score.json"
+
+        out_path.write_text(
+            json.dumps(score, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        return f"[ok] wrote score to {out_path}"
+
+    # -- JSONL: read original line, inject trace_score, write to output copy --
+
+    def _write_jsonl_score(
+        self,
+        src: Path,
+        line_num: int,
+        score: dict,
+        out_dir: Path,
+        is_gz: bool,
+    ) -> str:
+        # Read the original file to get the specific line
+        open_fn = gzip.open if is_gz else open
+        try:
+            with open_fn(src, "rt", encoding="utf-8", errors="replace") as fh:
+                lines = list(fh)
+        except Exception as exc:
+            return f"[error] failed to read {src}: {exc}"
+
+        if line_num < 1 or line_num > len(lines):
+            return f"[error] line {line_num} out of range (file has {len(lines)} lines)"
+
+        raw_line = lines[line_num - 1].strip()
+        if not raw_line:
+            return f"[error] line {line_num} is empty"
+
+        # Parse the line (handle uuid\tjson format)
+        uuid_prefix = None
+        try:
+            uuid_prefix, record = _parse_jsonl_line(raw_line)
+        except json.JSONDecodeError as exc:
+            return f"[error] failed to parse line {line_num}: {exc}"
+
+        if not isinstance(record, dict):
+            return f"[error] line {line_num} is not a JSON object (got {type(record).__name__})"
+
+        # Inject the score
+        record["trace_score"] = score
+
+        # Rebuild the line
+        updated_json = json.dumps(record, ensure_ascii=False)
+        if uuid_prefix:
+            updated_line = f"{uuid_prefix}\t{updated_json}"
+        else:
+            updated_line = updated_json
+
+        # Write to the output file (append mode — one line at a time)
+        out_name = src.name
+        if is_gz:
+            # Strip .gz for the output (write uncompressed)
+            out_name = out_name[:-3]
+        out_path = out_dir / out_name
+
+        with out_path.open("a", encoding="utf-8") as fh:
+            fh.write(updated_line + "\n")
+
+        return f"[ok] wrote score for line {line_num} to {out_path}"

@@ -26,8 +26,7 @@ Use `InputManifest.json`, `Schema.md`, and `Schema.json` for context.
 
 ALL data content will be delivered to you record by record as messages.
 Do NOT call ReadData, ReadFormat, Read, or any tool to read data files — the data
-comes to you directly. Your response will be automatically saved — you do not
-need to call any write tool.
+comes to you directly.
 
 ## How data is delivered
 
@@ -63,10 +62,34 @@ Answer these questions about the specific record you are looking at:
 6. **Fitness for task**: Is this record useful for the intended downstream task?
    What makes it good or bad as a training/evaluation example?
 
-## Format
+## Scoring — use the WriteScore tool
 
-Write your observations as a short bulleted list. Be specific — quote field
-names and values. Example:
+After inspecting each record (on the final or only block), you MUST call the
+`WriteScore` tool to record your scores. Scoring scale: 0–5
+(5 = strong, 3 = mixed, 1 = poor, 0 = unusable).
+
+**For JSONL records**: call WriteScore with the source file path, line number,
+and your score dict. The tool injects a `trace_score` field into that record
+and writes it to an output copy. Example:
+
+    WriteScore(
+        path="sample/data.jsonl",
+        line=3,
+        score='{"completeness": 4, "consistency": 5, "verifiability": 3, "signal_to_noise": 4, "safety": 5, "task_utility": 4}'
+    )
+
+**For JSON files**: call WriteScore with just the file path and your score dict
+(no line number). The tool writes `<name>_score.json` in the output directory.
+
+    WriteScore(
+        path="sample/config.json",
+        score='{"completeness": 5, "consistency": 5, "verifiability": 2, "signal_to_noise": 3, "safety": 5, "task_utility": 3}'
+    )
+
+## Response format
+
+Write your observations as a short bulleted list, then call WriteScore.
+Be specific — quote field names and values. Example:
 
 - fields: has `instruction`, `response`, `metadata`; missing `source_id` (expected per schema)
 - format: `metadata.timestamp` is a string "yesterday" instead of ISO-8601
@@ -74,9 +97,10 @@ names and values. Example:
 - content: 80% substantive; `metadata.tags` is empty list (filler)
 - safety: no PII or harmful content detected
 - fitness: good example — clear instruction with detailed response
+→ then call WriteScore(...)
 
 For non-final blocks of a multi-block record, just note what fields/content you
-see in this block. The full record assessment comes on the final block.
+see in this block. Do NOT call WriteScore until the final block.
 """
 
 _CONSOLIDATION_PROMPT = """\
@@ -289,6 +313,13 @@ class DataQualityDetailRunner(DataQualityRunner):
         log_path.write_text("", encoding="utf-8")
         obs_md.write_text("# Block Observations\n", encoding="utf-8")
 
+        # Clear the WriteScore output directory so stale scored files don't persist
+        score_out = self.workspace / "output"
+        if score_out.exists():
+            import shutil
+            shutil.rmtree(score_out)
+        score_out.mkdir(parents=True, exist_ok=True)
+
         # --- intro turn ---
         yield from agent.run(_DETAIL_QUALITY_INTRO_PROMPT)
 
@@ -346,6 +377,10 @@ class DataQualityDetailRunner(DataQualityRunner):
                     )
 
                     if is_last:
+                        score_reminder = (
+                            f"Then call WriteScore(path=\"{path}\", line={lineno}, "
+                            "score='{{...}}') with your scores."
+                        )
                         if total_blocks == 1:
                             prompt = (
                                 header
@@ -354,7 +389,7 @@ class DataQualityDetailRunner(DataQualityRunner):
                                 "Write your factual observations about THIS record: "
                                 "fields present/missing, format issues, verifiability, "
                                 "useful content vs filler, safety concerns, task fitness. "
-                                "Do NOT give an overall dataset summary or write the final QualityReport."
+                                f"{score_reminder}"
                             )
                         else:
                             prompt = (
@@ -365,7 +400,7 @@ class DataQualityDetailRunner(DataQualityRunner):
                                 "factual observations about THIS complete record: "
                                 "fields present/missing, format issues, verifiability, "
                                 "useful content vs filler, safety concerns, task fitness. "
-                                "Do NOT give an overall dataset summary or write the final QualityReport."
+                                f"{score_reminder}"
                             )
                     else:
                         prompt = (
@@ -373,7 +408,7 @@ class DataQualityDetailRunner(DataQualityRunner):
                             + f"This is block {block_idx}/{total_blocks} of record {lineno} "
                             f"(global block {block_count + 1}) — more blocks of this same "
                             f"record follow. Note what fields and content you see in this "
-                            f"block. Do not assess the full record yet."
+                            f"block. Do NOT call WriteScore yet."
                         )
 
                     yield from self._run_and_log(agent, prompt, log_path, block_count + 1, block_source)
@@ -410,15 +445,27 @@ class DataQualityDetailRunner(DataQualityRunner):
                 )
 
                 source = f"{filename} block {file_block_idx}/{total_blocks}"
+                is_last_json_block = file_block_idx == total_blocks
+                if is_last_json_block:
+                    score_instruction = (
+                        "Write your factual observations about the content in this block. "
+                        f"This is the final block of file `{filename}`. "
+                        f"Call WriteScore(path=\"{path}\", "
+                        "score='{{...}}') with your scores for this file."
+                    )
+                else:
+                    score_instruction = (
+                        "Write your factual observations about the content in this block: "
+                        "fields present/missing, format issues, verifiability, "
+                        "useful content vs filler, safety concerns, task fitness. "
+                        "Do NOT call WriteScore yet — more blocks of this file follow."
+                    )
                 prompt = (
                     f"JSON file: `{filename}` | block {file_block_idx}/{total_blocks}\n\n"
                     f"{block_text}\n\n"
                     f"This is block {file_block_idx}/{total_blocks} of file `{filename}` "
                     f"(global block {block_count + 1}). "
-                    "Write your factual observations about the content in this block: "
-                    "fields present/missing, format issues, verifiability, "
-                    "useful content vs filler, safety concerns, task fitness. "
-                    "Do NOT give an overall dataset summary or write the final QualityReport."
+                    f"{score_instruction}"
                 )
                 yield from self._run_and_log(agent, prompt, log_path, block_count + 1, source)
 
