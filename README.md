@@ -6,33 +6,44 @@ A multi-provider AI agent CLI framework written in Python. Provides a unified in
 
 ```
 data_agent_1.0/
-├── run.py                      # Interactive REPL entry point
-├── task_run.py                 # Automated coding task runner CLI
-├── quality_run.py              # Data quality workflow CLI
+├── run.py                          # Interactive REPL entry point
+├── task_run.py                     # Automated coding task runner CLI
+├── quality_run.py                  # Data quality workflow CLI (sampled)
+├── quality_detail_run.py           # Data quality workflow CLI (full block coverage)
+├── agent_cli.py                    # Pipeline-compatible CLI (llm-agent run interface)
 ├── agent/
-│   ├── agent.py                # Main Agent class: turn loop, streaming, tool dispatch
-│   ├── agent_factory.py        # AgentFactory: builds configured Agent per task type
-│   ├── runner_registry.py      # RunnerRegistry: maps task types → AgentFactory configs
-│   ├── task_runner.py          # CodingTaskRunner: 8-phase coding pipeline
-│   ├── data_quality_runner.py  # DataQualityRunner: 3-phase data inspection pipeline
-│   ├── client.py               # LLM API client (OpenAI-compatible)
-│   ├── config.py               # Configuration from .env
-│   ├── compression.py          # Context compression service
-│   ├── session.py              # Session persistence
-│   ├── telemetry.py            # Token / metrics tracking
-│   ├── logger.py               # Pluggable trace formats
-│   ├── retry.py                # Exponential backoff with jitter
-│   ├── sandbox.py              # SandboxedRegistry: constrains file ops to workspace
+│   ├── agent.py                    # Main Agent class: turn loop, streaming, tool dispatch
+│   ├── agent_factory.py            # AgentFactory: builds configured Agent per task type
+│   ├── runner_registry.py          # RunnerRegistry: maps task types → AgentFactory configs
+│   ├── task_runner.py              # CodingTaskRunner: 8-phase coding pipeline
+│   ├── data_quality_runner.py      # DataQualityRunner: 3-phase sampled pipeline
+│   ├── data_quality_detail_runner.py # DataQualityDetailRunner: full block coverage
+│   ├── data_inspector.py           # Data inspection utilities (detect_data_kind, etc.)
+│   ├── progress.py                 # ProgressPrinter: shared Rich progress base class
+│   ├── memory_log.py               # MemoryLog: compression audit records
+│   ├── multi_agent.py              # AgentManager: background sub-agent management
+│   ├── client.py                   # LLM API client (OpenAI-compatible)
+│   ├── config.py                   # Configuration from .env
+│   ├── compression.py              # Context compression service
+│   ├── session.py                  # Session persistence
+│   ├── telemetry.py                # Token / metrics tracking
+│   ├── logger.py                   # Pluggable trace formats
+│   ├── retry.py                    # Exponential backoff with jitter
+│   ├── sandbox.py                  # SandboxedRegistry: constrains file ops to workspace
 │   └── tools/
-│       ├── base.py             # Tool ABC + ToolRegistry (auto JSON-schema)
-│       ├── profiles.py         # 10 named tool profiles + auto-detection
-│       ├── data.py             # ReadDataTool: json/jsonl/json_gz/jsonl_gz
-│       ├── claude.py           # Claude Code style tools
-│       ├── gemini.py           # Gemini CLI style tools
-│       ├── qwen.py             # Qwen Coder style tools
+│       ├── base.py                 # Tool ABC + ToolRegistry (auto JSON-schema)
+│       ├── profiles.py             # 10 named tool profiles + auto-detection
+│       ├── data.py                 # ReadFormat, ReadData, ReadBlockMemory,
+│       │                           #   ReadBlockSummary, WriteScore tools
+│       ├── claude.py               # Claude Code style tools
+│       ├── gemini.py               # Gemini CLI style tools
+│       ├── qwen.py                 # Qwen Coder style tools
+│       ├── codex.py                # Codex-rs style tools
+│       ├── opencode.py             # OpenCode style tools
+│       ├── multi_agents.py         # Multi-agent tools (spawn, send, wait, close, resume)
 │       └── files.py, shell.py, web.py, ...
 └── cli/
-    └── main.py                 # Rich-based terminal UI
+    └── main.py                     # Rich-based terminal UI
 ```
 
 ## Key Features
@@ -49,7 +60,7 @@ Different toolsets matching popular AI CLIs and task types:
 | `gpt`       | `gpt-*`, `o1-*`, `o3-*`, `o4-*` | Conservative OpenAI style |
 | `opencode`  | `opencode-*` models       | OpenCode style (read, write, glob, bash, codesearch, etc.) |
 | `codex`     | `codex-*` models          | Codex-rs style with multi-agent and patch tools |
-| `datacheck` | `DataQualityRunner`       | Data inspection: Bash, Glob, Grep, LS, Read, Edit, Write, ReadData |
+| `datacheck` | `DataQualityRunner`, `DataQualityDetailRunner` | Data inspection: Bash, Glob, Grep, LS, Read, Edit, Write, ReadFormat, ReadData, ReadBlockMemory, ReadBlockSummary, WriteScore |
 | `default`   | all other models          | All built-in tools |
 | `readonly`  | safe exploration          | Read-only tools (no shell, no writes) |
 | `minimal`   | lightweight tasks         | Shell + read_file only |
@@ -75,25 +86,33 @@ factory = default_registry.make_factory("coding", Config())
 factory = default_registry.make_factory("quality", Config(), profile="readonly")
 ```
 
-### ReadDataTool — Context-Safe Data Inspection
+### Data Tools — Context-Safe Inspection Suite
 
-`ReadDataTool` reads structured data files and returns a bounded preview that is safe to insert into an LLM context window:
+Five tools are bundled in the `datacheck` profile for structured data inspection:
 
-- **Supported formats**: `json`, `jsonl`, `json_gz`, `jsonl_gz`
-- **JSONL variants**: handles both `{json}` and `uuid\t{json}` line formats
-- **Field-level truncation**: long string values are replaced with `"[truncated: N chars]"` before JSON serialisation — the agent always sees valid JSON with all keys intact, never a broken string cut mid-character
-- **Hard caps**: `max_records=5` records, `max_chars=8000` total output
-- **Nested structures**: truncation is applied recursively through dicts and lists
+| Tool | Purpose |
+|------|---------|
+| `ReadFormatTool` | File format metadata (kind, size, record count, sample keys) without loading full content |
+| `ReadDataTool` | Bounded data preview with field-level truncation (see below) |
+| `ReadBlockMemoryTool` | Stream a file in fixed-size blocks with memory context injected between blocks |
+| `ReadBlockSummaryTool` | Stream a file in fixed-size blocks with a running summary context |
+| `WriteScoreTool` | Write per-record or per-file quality scores; upserts by line number (no duplicates) |
+
+**ReadDataTool** returns structurally-valid JSON with all keys intact, regardless of value length:
 
 ```
-# Broken raw-string approach (old):
+# Raw-string truncation (broken — keys disappear):
 --- record 1 ---
-{"body": "The quick brown fox jumps over the lazy dog The quick brow... [record truncated]
+{"body": "The quick brown fox jumps over the lazy dog The quick brow... [truncated]
 
-# Field-level truncation (current):
+# Field-level truncation (current — all keys visible):
 --- record 1 ---
 {"id": 1, "title": "My Doc", "body": "[truncated: 18,432 chars]", "label": "positive"}
 ```
+
+Supported formats: `json`, `jsonl`, `json_gz`, `jsonl_gz`. JSONL handles both `{json}` and `uuid\t{json}` line formats. Hard caps: `max_records=5`, `max_chars=8000`. Truncation is applied recursively through nested dicts and lists.
+
+**WriteScoreTool** uses a line-number-indexed upsert strategy: it reads the existing output JSONL file keyed by `_trace_line_num`, overwrites the entry for the current line, and rewrites the file sorted by line number. Calling `WriteScore` twice for the same line overwrites rather than appends — the output always has exactly one record per scored line.
 
 ### Agent Modes
 
@@ -115,6 +134,19 @@ Automatically compresses conversation history when approaching token limits:
 - Three-phase: truncate large tool outputs → summarise old history → self-correct
 - Configurable threshold (default: 50% of context limit)
 - Preserves recent messages verbatim
+- **MemoryLog** (`agent/memory_log.py`) — optionally audits each compression event to `memory_logs/`, recording original/new token counts, reduction percentage, and the resulting `<state_snapshot>`
+
+### Multi-Agent Support
+
+`AgentManager` (`agent/multi_agent.py`) manages a pool of background sub-agents running in threads. Five matching tools (`agent/tools/multi_agents.py`) let the LLM orchestrate parallel work:
+
+| Tool | Action |
+|------|--------|
+| `spawn_agent` | Launch a named sub-agent with a task |
+| `send_input` | Send a follow-up message to a running agent |
+| `wait_for_agents` | Block until agents finish and collect results |
+| `close_agent` | Signal an agent to stop |
+| `resume_agent` | Spawn an agent that resumes a saved session |
 
 ### Auto Profile Detection
 
@@ -139,13 +171,20 @@ Configuration is loaded from a `.env` file in the project root:
 | `LLM_BASE_URL` | API endpoint | `http://localhost:11434/v1` |
 | `LLM_API_KEY` | API key | `local` |
 | `LLM_MODEL` | Model name | `llama3.2` |
-| `LLM_TOOL_PROFILE` | Tool profile (`auto`, `claude`, `datacheck`, etc.) | `auto` |
+| `LLM_TOOL_PROFILE` | Global tool profile (`auto`, `claude`, `datacheck`, etc.) | `auto` |
+| `LLM_CODING_PROFILE` | Per-runner override for `CodingTaskRunner` | `claude` |
+| `LLM_QUALITY_PROFILE` | Per-runner override for `DataQualityRunner` / `DataQualityDetailRunner` | `datacheck` |
 | `LLM_CONTEXT_LIMIT` | Token limit for context window | `200000` |
 | `LLM_MAX_TOOL_ITERATIONS` | Max tool calls per turn | `10` |
 | `LLM_STREAM` | Enable streaming responses | `true` |
 | `LLM_COMPRESSION_THRESHOLD` | Fraction of context before compression | `0.5` |
-| `LLM_COMPRESSION_PRESERVE_FRACTION` | Fraction of recent history to keep | `0.3` |
+| `LLM_COMPRESSION_PRESERVE_FRACTION` | Fraction of recent history to keep verbatim | `0.3` |
+| `LLM_COMPRESSION_TOOL_BUDGET_TOKENS` | Max tokens of tool results in preserved history | `50000` |
+| `LLM_LOG_FORMAT` | Trace format: `openhands`, `swe-agent`, `mini-swe-agent`, `all`, `none` | `openhands` |
+| `LLM_READ_MAX_CHARS` | Max chars per single read_file call | `100000` |
 | `LLM_RETRY_MAX_ATTEMPTS` | Max retry attempts on API failure | `5` |
+| `LLM_RETRY_INITIAL_DELAY_MS` | Starting retry delay | `1000` |
+| `LLM_RETRY_MAX_DELAY_MS` | Max retry delay | `30000` |
 
 ## Usage
 
@@ -165,7 +204,7 @@ python task_run.py --model claude-opus-4-6 "Build Y"
 
 The task runner runs an 8-phase pipeline: task intake → repo recon → plan → code → tests → test/fix loop → review → documentation. Outputs land in a sandboxed workspace folder alongside a trace file in `api_logs/`.
 
-### Data Quality Workflow
+### Data Quality Workflow (Sampled)
 
 ```bash
 python quality_run.py                           # default: inspects ./sample/
@@ -174,7 +213,28 @@ python quality_run.py data_dir/ --focus "Prioritize safety and trajectory useful
 python quality_run.py --model claude-opus-4-6 data/
 ```
 
-The quality runner runs a 3-phase pipeline: schema analysis → quality assessment (6 dimensions, 0–5 scale) → gate decision (ACCEPT / REVIEW / REJECT). Outputs: `Schema.md`, `Schema.json`, `QualityReport.json`, `QualityReport.md`, `GateDecision.md`.
+The quality runner runs a 3-phase pipeline: schema analysis → quality assessment (6 dimensions, 0–5 scale) → gate decision (ACCEPT / REVIEW / REJECT). The agent uses tools to selectively sample data. Outputs: `Schema.md`, `Schema.json`, `QualityReport.json`, `QualityReport.md`, `GateDecision.md`.
+
+### Data Quality Workflow (Full Block Coverage)
+
+```bash
+python quality_detail_run.py                    # default: inspects ./sample/
+python quality_detail_run.py data/sample.json   # single file
+python quality_detail_run.py data_dir/ --focus "Prioritize safety"
+python quality_detail_run.py --model claude-opus-4-6 data/
+python quality_detail_run.py --clean data/      # wipe output folder first
+```
+
+`DataQualityDetailRunner` guarantees every block of every data record is delivered directly to the agent — no sampling, no agent discretion. The runner pushes blocks as messages; the agent writes per-record observations. Additional outputs beyond the standard quality pipeline: `ObservationLog.jsonl`, `ObservationSummary.json`.
+
+Output is written to a structured run folder:
+
+```
+output/{timestamp}_{session_id}/
+├── files/       ← Schema.md, QualityReport.md, GateDecision.md, ObservationLog.jsonl, …
+├── trajectory/  ← trace files (OpenHands, SWE-agent, mini-SWE-agent formats)
+└── memory/      ← MemoryLog compression audit records
+```
 
 ### Programmatic Usage
 

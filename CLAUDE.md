@@ -17,11 +17,17 @@ python task_run.py "Build a stack class"        # custom task
 python task_run.py --quiet --max-iterations 3 "Build X"
 python task_run.py --model claude-opus-4-6 "Build Y"
 
-# Run the data quality workflow
+# Run the data quality workflow (sampled — fast)
 python quality_run.py                           # default: inspects ./sample/
 python quality_run.py data/sample.json          # single file
 python quality_run.py data_dir/ --focus "Prioritize safety"
 python quality_run.py --model claude-opus-4-6 data/
+
+# Run the detailed data quality workflow (full block coverage — thorough)
+python quality_detail_run.py                    # default: inspects ./sample/
+python quality_detail_run.py data/sample.json   # single file
+python quality_detail_run.py data_dir/ --focus "Prioritize safety"
+python quality_detail_run.py --model claude-opus-4-6 data/
 
 # Run tests
 pytest tests/ -v
@@ -36,53 +42,80 @@ There is no Makefile, tox, pyproject.toml, setup.py, or CI pipeline.
 ### Component Map
 
 ```
-run.py                → Entry point: from cli.main import main; main()
-task_run.py           → Standalone CodingTaskRunner with CLI args
-quality_run.py        → Standalone DataQualityRunner with CLI args
+run.py                    → Entry point: from cli.main import main; main()
+task_run.py               → Standalone CodingTaskRunner with CLI args
+quality_run.py            → Standalone DataQualityRunner with CLI args (sampled)
+quality_detail_run.py     → Standalone DataQualityDetailRunner with CLI args (full block coverage)
+agent_cli.py              → Pipeline-compatible CLI entry point (llm-agent run interface)
 
 agent/
-├── agent.py          → Agent class: main turn loop, streaming, tool dispatch,
-│                       plan-then-execute mode
-├── agent_factory.py  → AgentFactory: builds a configured Agent for a task type;
-│                       decouples tool-profile + system-prompt from runner plumbing
-├── runner_registry.py→ RunnerRegistry: maps task-type names to default AgentFactory
-│                       configs; profile resolution order: explicit kwarg >
-│                       LLM_<NAME>_PROFILE > LLM_TOOL_PROFILE > registered default
-├── api.py            → AgentAPI: sync/async wrapper around Agent
-├── client.py         → LLMClient: OpenAI-compatible HTTP, streaming,
-│                       ChatResponse for stream/non-stream
-├── config.py         → Config (Pydantic): loads from .env, builds system prompts
-├── compression.py    → CompressionService: 3-phase LLM-based history compression
-│                       (truncate tool output → summarise old → self-correct)
-├── session.py        → SessionRecordingService: save/resume to .gemini/sessions/
-├── telemetry.py      → SessionMetrics, TokenUsageStats, ModelMetrics, ToolMetrics
-├── logger.py         → APILogger: pluggable trace formats (OpenHands, SWE-agent,
-│                       mini-SWE-agent), composite logger for multiple formats
-├── retry.py          → retry_with_backoff: exponential backoff + jitter,
-│                       respects Retry-After header
-├── sandbox.py        → SandboxedRegistry: constrains all tool file ops to workspace
-├── task_runner.py    → CodingTaskRunner: 8-phase automated coding pipeline;
-│                       uses RunnerRegistry for default AgentFactory ("claude" profile)
-├── data_quality_runner.py → DataQualityRunner: 3-phase data inspection pipeline;
-│                       uses RunnerRegistry for default AgentFactory ("datacheck" profile)
+├── agent.py              → Agent class: main turn loop, streaming, tool dispatch,
+│                           plan-then-execute mode
+├── agent_factory.py      → AgentFactory: builds a configured Agent for a task type;
+│                           decouples tool-profile + system-prompt from runner plumbing
+├── runner_registry.py    → RunnerRegistry: maps task-type names to default AgentFactory
+│                           configs; profile resolution order: explicit kwarg >
+│                           LLM_<NAME>_PROFILE > LLM_TOOL_PROFILE > registered default
+├── api.py                → AgentAPI: sync/async wrapper around Agent
+├── client.py             → LLMClient: OpenAI-compatible HTTP, streaming,
+│                           ChatResponse for stream/non-stream
+├── config.py             → Config (Pydantic): loads from .env, builds system prompts
+├── compression.py        → CompressionService: 3-phase LLM-based history compression
+│                           (truncate tool output → summarise old → self-correct)
+├── session.py            → SessionRecordingService: save/resume to .gemini/sessions/
+├── telemetry.py          → SessionMetrics, TokenUsageStats, ModelMetrics, ToolMetrics
+├── logger.py             → APILogger: pluggable trace formats (OpenHands, SWE-agent,
+│                           mini-SWE-agent), composite logger for multiple formats
+├── retry.py              → retry_with_backoff: exponential backoff + jitter,
+│                           respects Retry-After header
+├── sandbox.py            → SandboxedRegistry: constrains all tool file ops to workspace
+├── progress.py           → ProgressPrinter: shared Rich-based progress printer base class;
+│                           runners subclass and override PHASES + _print_result
+├── memory_log.py         → MemoryLog: writes a JSON record to memory_logs/ each time
+│                           the agent compresses history; audits what was summarised,
+│                           token counts, and the resulting <state_snapshot>
+├── data_inspector.py     → DataInspector utilities: detect_data_kind, inspect_file,
+│                           build_input_manifest, chunk_text, infer_schema_family
+├── multi_agent.py        → AgentManager: global manager for background sub-agents;
+│                           tracks status/roles/results; agents run in threads
+├── task_runner.py        → CodingTaskRunner: 8-phase automated coding pipeline;
+│                           uses RunnerRegistry for default AgentFactory ("claude" profile)
+├── data_quality_runner.py     → DataQualityRunner: 3-phase data inspection pipeline
+│                               (sampled); uses RunnerRegistry ("datacheck" profile)
+└── data_quality_detail_runner.py → DataQualityDetailRunner: extends DataQualityRunner;
+                                    pushes every block of every record to the agent —
+                                    no sampling, no truncation, no agent discretion;
+                                    writes ObservationLog.jsonl + ObservationSummary.json
+
 └── tools/
-    ├── base.py       → Tool (ABC) + ToolRegistry: auto-generates JSON schema
-    │                   from run() type hints + Google-style Args: docstrings
-    ├── profiles.py   → ToolProfile + 10 named profiles, auto-detection from model name
-    ├── data.py       → ReadDataTool: reads json/jsonl/json_gz/jsonl_gz with
-    │                   field-level value truncation to guard LLM context window;
-    │                   handles uuid\t{json} and plain {json} JSONL formats
-    ├── shell.py      → ShellTool, OpenTerminalTool
-    ├── files.py      → ReadFileTool, WriteFileTool, GlobTool, GrepTool,
-    │                   ListDirTool, MultiEditTool, ReadManyFilesTool
-    ├── web.py        → WebFetchTool, WebSearchTool
-    ├── plan.py       → WritePlanTool, PLAN_READY_SENTINEL
-    ├── task.py       → TaskTool
-    ├── todo.py       → TodoReadTool, TodoWriteTool
-    ├── claude.py     → Claude Code style tools (Bash, Read, Edit, Write, LS, etc.)
-    ├── gemini.py     → Gemini CLI style tools (replace, read_file, grep_search, etc.)
-    ├── qwen.py       → Qwen Coder style tools (edit, read_file, shell, lsp, etc.)
-    └── notebook.py   → NotebookRead, NotebookEdit
+    ├── base.py           → Tool (ABC) + ToolRegistry: auto-generates JSON schema
+    │                       from run() type hints + Google-style Args: docstrings
+    ├── profiles.py       → ToolProfile + 10 named profiles, auto-detection from model name
+    ├── data.py           → Data inspection tools:
+    │                         ReadFormatTool — file format/structure metadata
+    │                         ReadDataTool   — json/jsonl/gz with field-level truncation
+    │                         ReadBlockMemoryTool  — block-level reading with memory context
+    │                         ReadBlockSummaryTool — block-level reading with summary context
+    │                         WriteScoreTool — write per-record/per-file quality scores;
+    │                           upserts by line number so re-scoring never duplicates
+    ├── shell.py          → ShellTool, OpenTerminalTool
+    ├── files.py          → ReadFileTool, WriteFileTool, GlobTool, GrepTool,
+    │                       ListDirTool, MultiEditTool, ReadManyFilesTool
+    ├── web.py            → WebFetchTool, WebSearchTool
+    ├── plan.py           → WritePlanTool, PLAN_READY_SENTINEL
+    ├── task.py           → TaskTool
+    ├── todo.py           → TodoReadTool, TodoWriteTool
+    ├── claude.py         → Claude Code style tools (Bash, Read, Edit, Write, LS, etc.)
+    ├── gemini.py         → Gemini CLI style tools (replace, read_file, grep_search, etc.)
+    ├── qwen.py           → Qwen Coder style tools (edit, read_file, shell, lsp, etc.)
+    ├── codex.py          → Codex-rs style tools (shell, apply_patch, update_plan,
+    │                       request_user_input, js_repl, list_mcp_resources, etc.)
+    ├── opencode.py       → OpenCode style tools (read, write, glob, grep, bash,
+    │                       websearch, todowrite, task, apply_patch, codesearch, lsp, etc.)
+    ├── multi_agents.py   → Multi-agent tools backed by AgentManager:
+    │                       spawn_agent, send_input, wait_for_agents,
+    │                       close_agent, resume_agent
+    └── notebook.py       → NotebookRead, NotebookEdit
 
 cli/
 ├── main.py           → Rich-based REPL, slash commands, event rendering
@@ -112,7 +145,12 @@ To add a new task type: register an entry in `RunnerRegistry`, write a runner cl
 - `qwen-*` → `qwen` profile
 - others → `default` profile
 
-**ReadDataTool context protection** (`agent/tools/data.py`) — uses *field-level value truncation* rather than raw string slicing. Long string values inside a record are replaced with `"[truncated: N chars]"` before JSON serialisation, so the agent always receives structurally-valid JSON with all keys visible. Nested dicts and lists are handled recursively. Hard caps: `max_records=5` records, `max_chars=8000` total output.
+**Data tools** (`agent/tools/data.py`) — five tools for the `datacheck` profile:
+
+- **ReadFormatTool** — returns file format metadata (kind, size, record count, sample keys) without loading full content.
+- **ReadDataTool** — context-safe data preview using *field-level value truncation*. Long string values are replaced with `"[truncated: N chars]"` before JSON serialisation so the agent always sees valid JSON with all keys intact. Nested dicts/lists handled recursively. Hard caps: `max_records=5`, `max_chars=8000`.
+- **ReadBlockMemoryTool / ReadBlockSummaryTool** — stream a file in fixed-size blocks with memory/summary context injected between blocks; used by the detail runner for exhaustive record-by-record review.
+- **WriteScoreTool** — writes per-record or per-file quality scores to a JSONL output file. Uses a *line-number-indexed upsert strategy*: reads the existing output file keyed by `_trace_line_num`, overwrites the entry for the current line, then rewrites the whole file sorted by line number. Calling `WriteScore` twice for the same line overwrites rather than appends — the output always has exactly one record per scored line.
 
 **Context compression** (`agent/compression.py`) triggers at a configurable fraction of `LLM_CONTEXT_LIMIT`. Three-phase approach:
 1. Truncate large tool outputs (budget-based)
@@ -152,7 +190,7 @@ Default profile: `claude`. Workspace folders are named to match the trace file:
 
 ### DataQualityRunner Flow (quality_run.py)
 
-The quality runner orchestrates a 3-phase data inspection pipeline:
+The quality runner orchestrates a 3-phase data inspection pipeline (sampled — agent uses tools to selectively read data):
 
 1. **Phase 1 — Schema Analysis**: Agent reads `InputManifest.json`, samples files using `ReadData`, identifies data format families; produces `Schema.md` and `Schema.json`
 2. **Phase 2 — Quality Assessment**: Agent scores six dimensions (0–5 scale) across all input files:
@@ -165,9 +203,27 @@ The quality runner orchestrates a 3-phase data inspection pipeline:
    Produces `QualityReport.json` and `QualityReport.md`; every score must cite concrete evidence.
 3. **Phase 3 — Gate Decision**: Agent issues a final verdict (`ACCEPT` / `REVIEW` / `REJECT`) with rationale; produces `GateDecision.md`
 
-Default profile: `datacheck` (Bash, Glob, Grep, LS, Read, Edit, Write, ReadData).
+Default profile: `datacheck` (Bash, Glob, Grep, LS, Read, Edit, Write, ReadFormat, ReadData, ReadBlockMemory, ReadBlockSummary, WriteScore).
 Inputs default to `./sample/` when no paths are given.
 Trace files and workspace folders follow the same naming convention as `CodingTaskRunner`.
+
+### DataQualityDetailRunner Flow (quality_detail_run.py)
+
+Extends `DataQualityRunner` with **full block coverage**: every block of every data record is pushed directly to the agent as a message — the agent never calls data-reading tools, nothing is sampled or skipped.
+
+Phases 1 and 3 are identical to `DataQualityRunner`. Phase 2 differs:
+
+2. **Phase 2 — Per-Record Observation**: The runner splits each file into `_DETAIL_BLOCK_SIZE`-char blocks and delivers them one by one. The agent writes concrete factual observations for each record (fields present/missing, format anomalies, verifiability, signal-to-noise, safety). Every `_CONSOLIDATION_INTERVAL` records a consolidation turn merges observations. Produces:
+   - `ObservationLog.jsonl` — one JSON record per block observed
+   - `ObservationSummary.json` — consolidated summary after all records
+
+Output layout (differs from `DataQualityRunner`):
+```
+output/{ts}_{session_id}/
+├── files/       ← workspace: Schema.md, QualityReport.md, GateDecision.md, etc.
+├── trajectory/  ← trace files (OpenHands, SWE-agent, mini-SWE formats)
+└── memory/      ← MemoryLog compression audit records
+```
 
 ### Configuration (.env)
 
@@ -204,7 +260,12 @@ Trace files and workspace folders follow the same naming convention as `CodingTa
   - `trace_sweagent_{ts}_{session_id}.traj` — SWE-agent trajectory
   - `trace_miniswe_{ts}_{session_id}.json` — mini-SWE-agent flat messages
 - `task_workspace/` — per-task coding workspace folders
-- `quality_workspace/` — per-run data quality workspace folders
+- `quality_workspace/` — per-run data quality workspace folders (quality_run.py)
+- `output/{ts}_{session_id}/` — per-run output for quality_detail_run.py
+  - `files/` — workspace outputs (schema, reports, gate decision)
+  - `trajectory/` — trace files per log format
+  - `memory/` — MemoryLog compression audit records
+- `memory_logs/` — global compression audit records (when MemoryLog is enabled)
 - `.agent_todos.json` — todo list used by TodoRead/TodoWrite tools
 
 ### Dependencies (requirements.txt)
