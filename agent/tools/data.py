@@ -740,6 +740,13 @@ class WriteScoreTool(Tool):
         return f"[ok] wrote score to {out_path}"
 
     # -- JSONL: read original line, inject trace_score, write to output copy --
+    #
+    # Uses a line-number-indexed strategy to prevent duplicate records:
+    # 1. Read the existing output file (if any) into a dict keyed by line number
+    # 2. Update/overwrite the entry for the given line
+    # 3. Rewrite the entire output file from the dict (sorted by line number)
+    # This means calling WriteScore twice for the same line overwrites rather
+    # than appends, so the output always has exactly one record per scored line.
 
     def _write_jsonl_score(
         self,
@@ -784,14 +791,48 @@ class WriteScoreTool(Tool):
         else:
             updated_line = updated_json
 
-        # Write to the output file (append mode — one line at a time)
+        # Determine output path
         out_name = src.name
         if is_gz:
             # Strip .gz for the output (write uncompressed)
             out_name = out_name[:-3]
         out_path = out_dir / out_name
 
-        with out_path.open("a", encoding="utf-8") as fh:
-            fh.write(updated_line + "\n")
+        # Read existing output into a line-number-indexed dict
+        existing: dict[int, str] = {}
+        if out_path.exists():
+            for raw in out_path.read_text(encoding="utf-8").splitlines():
+                raw = raw.strip()
+                if not raw:
+                    continue
+                # Extract the line number from the _trace_line_num field
+                try:
+                    _, obj = _parse_jsonl_line(raw)
+                    if isinstance(obj, dict) and "_trace_line_num" in obj:
+                        existing[int(obj["_trace_line_num"])] = raw
+                        continue
+                except (json.JSONDecodeError, ValueError, TypeError):
+                    pass
+                # Fallback: keep unrecognised lines at negative keys so they
+                # sort before real lines and aren't lost
+                existing[-(len(existing) + 1)] = raw
 
-        return f"[ok] wrote score for line {line_num} to {out_path}"
+        # Add _trace_line_num so we can identify lines on re-read
+        record["_trace_line_num"] = line_num
+        updated_json = json.dumps(record, ensure_ascii=False)
+        if uuid_prefix:
+            updated_line = f"{uuid_prefix}\t{updated_json}"
+        else:
+            updated_line = updated_json
+
+        # Upsert this line's entry (detect if overwriting)
+        is_update = line_num in existing
+        existing[line_num] = updated_line
+
+        # Rewrite the output file (sorted by line number)
+        with out_path.open("w", encoding="utf-8") as fh:
+            for key in sorted(existing.keys()):
+                fh.write(existing[key] + "\n")
+
+        action = "updated" if is_update else "wrote"
+        return f"[ok] {action} score for line {line_num} to {out_path}"
