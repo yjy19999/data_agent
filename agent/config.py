@@ -93,6 +93,12 @@ class Config(BaseModel):
     agent_max_depth: int = Field(
         default_factory=lambda: int(os.getenv("LLM_AGENT_MAX_DEPTH", "3"))
     )
+    # Number of concurrent per-record sub-agents in DataQualityDetailMultiRunner
+    # 1 = sequential (one fresh agent per record, no parallelism)
+    # N = N records inspected simultaneously via AgentManager threads
+    quality_record_workers: int = Field(
+        default_factory=lambda: int(os.getenv("LLM_QUALITY_RECORD_WORKERS", "1"))
+    )
 
 
 def build_system_prompt(tool_names: list[str]) -> str:

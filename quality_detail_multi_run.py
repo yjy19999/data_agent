@@ -11,7 +11,7 @@ Usage:
     python quality_detail_multi_run.py                                        # inspect ./sample/
     python quality_detail_multi_run.py data/sample.json                       # single file
     python quality_detail_multi_run.py data_dir/ --focus "Prioritize safety"  # custom focus
-    python quality_detail_multi_run.py --batch-size 4 data/                   # 4 parallel sub-agents
+    python quality_detail_multi_run.py --record-workers 4 data/               # 4 parallel sub-agents
     python quality_detail_multi_run.py --quiet data/                          # no live output
     python quality_detail_multi_run.py --model claude-opus-4-6 data/          # override model
 """
@@ -56,11 +56,11 @@ def main() -> int:
     parser.add_argument("--quiet", action="store_true", help="No live output")
     parser.add_argument("--model", default=None, help="Override LLM model name")
     parser.add_argument(
-        "--batch-size", type=int, default=1, metavar="N",
+        "--record-workers", type=int, default=None, metavar="N",
         help=(
-            "Records processed concurrently (default: 1 = sequential). "
-            "Set to 2-4 to run parallel sub-agents via AgentManager. "
-            "Higher values increase throughput but require more API capacity."
+            "Concurrent per-record sub-agents "
+            "(default: LLM_QUALITY_RECORD_WORKERS from .env, fallback 1). "
+            "1 = sequential. 2-4 = parallel via AgentManager threads."
         ),
     )
     parser.add_argument(
@@ -106,12 +106,15 @@ def main() -> int:
             compression_threshold=config.compression_threshold,
         )
 
+    # CLI flag overrides .env; .env overrides hardcoded default of 1
+    record_workers = args.record_workers if args.record_workers is not None else config.quality_record_workers
+
     focus = args.focus or _DEFAULT_FOCUS
 
     # ── Pre-run config panel ────────────────────────────────────────────────
     parallel_label = (
-        f"[bold cyan]{args.batch_size} concurrent sub-agents[/bold cyan]"
-        if args.batch_size > 1
+        f"[bold cyan]{record_workers} concurrent sub-agents[/bold cyan]"
+        if record_workers > 1
         else "[bold green]sequential (1 sub-agent at a time)[/bold green]"
     )
     cfg_table = Table(box=None, show_header=False, padding=(0, 1))
@@ -137,7 +140,7 @@ def main() -> int:
         session_id=session_id,
         logs_dir=logs_dir,
         memory_log_dir=memory_dir,
-        batch_size=args.batch_size,
+        record_workers=record_workers,
         consolidation_interval=args.consolidation_interval,
     )
     result = runner.run(args.inputs, focus=focus, verbose=not args.quiet)

@@ -505,7 +505,7 @@ Do NOT write a dataset-level report. One record only.
 """
 
 # Module-level lock: guards the read-modify-rewrite cycle in WriteScoreTool
-# when batch_size > 1 causes concurrent sub-agents writing to the same file.
+# when record_workers > 1 causes concurrent sub-agents writing to the same file.
 _SCORE_WRITE_LOCK = threading.Lock()
 
 
@@ -610,7 +610,7 @@ class DataQualityDetailMultiRunner(DataQualityDetailRunner):
 
     Parameters
     ----------
-    batch_size : int
+    record_workers : int
         Number of records processed concurrently via AgentManager threads.
         Default 1 = sequential (safest, no file-locking needed for WriteScore).
         Set to 2–4 for parallel throughput; requires thread-safe WriteScore
@@ -623,14 +623,14 @@ class DataQualityDetailMultiRunner(DataQualityDetailRunner):
     def __init__(
         self,
         *args: Any,
-        batch_size: int = 1,
+        record_workers: int = 1,
         consolidation_interval: int = _CONSOLIDATION_INTERVAL,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, consolidation_interval=consolidation_interval, **kwargs)
-        if batch_size < 1:
-            raise ValueError(f"batch_size must be >= 1, got {batch_size}")
-        self.batch_size = batch_size
+        if record_workers < 1:
+            raise ValueError(f"record_workers must be >= 1, got {record_workers}")
+        self.record_workers = record_workers
 
     # ------------------------------------------------------------------
     # Schema context helper
@@ -717,7 +717,7 @@ class DataQualityDetailMultiRunner(DataQualityDetailRunner):
         # record_agent goes out of scope here → GC'd, no state carried forward
 
     # ------------------------------------------------------------------
-    # Parallel batch driver (batch_size > 1)
+    # Parallel batch driver (record_workers > 1)
     # ------------------------------------------------------------------
 
     def _run_batch_parallel(
@@ -740,7 +740,7 @@ class DataQualityDetailMultiRunner(DataQualityDetailRunner):
         """
         from .multi_agent import get_manager
 
-        manager = get_manager(max_threads=max(self.batch_size, 4))
+        manager = get_manager(max_threads=max(self.record_workers, 4))
 
         # Build one full prompt string per record (all blocks concatenated
         # with clear separators — the sub-agent sees the whole record at once
@@ -868,7 +868,7 @@ class DataQualityDetailMultiRunner(DataQualityDetailRunner):
                 )
                 prev_file = filename
 
-            if self.batch_size == 1:
+            if self.record_workers == 1:
                 # ── sequential: one sub-agent per record, in order ──
                 for lineno, line_content in enumerate(lines, start=1):
                     yield from self._run_single_record(
@@ -880,10 +880,10 @@ class DataQualityDetailMultiRunner(DataQualityDetailRunner):
                         yield from self._consolidate(agent, block_count[0])
 
             else:
-                # ── batched parallel: up to batch_size sub-agents at once ──
+                # ── batched parallel: up to record_workers sub-agents at once ──
                 enumerated = list(enumerate(lines, start=1))
-                for batch_start in range(0, len(enumerated), self.batch_size):
-                    batch = enumerated[batch_start : batch_start + self.batch_size]
+                for batch_start in range(0, len(enumerated), self.record_workers):
+                    batch = enumerated[batch_start : batch_start + self.record_workers]
                     yield from self._run_batch_parallel(
                         schema_context, filename, path,
                         batch, total, log_path, block_count,
