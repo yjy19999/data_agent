@@ -8,6 +8,7 @@ parent can dispatch work and later collect results via wait().
 """
 from __future__ import annotations
 
+import json
 import queue
 import threading
 import time
@@ -175,11 +176,46 @@ class AgentEntry:
     _stop_flag:   threading.Event         = field(default_factory=threading.Event, repr=False)
     _input_queue: queue.Queue             = field(default_factory=queue.Queue, repr=False)
 
+    # Progress tracking (written by _run thread, read by any thread via progress_snapshot)
+    _progress_lock:  threading.Lock = field(default_factory=threading.Lock, repr=False)
+    _tool_log:       list[dict]     = field(default_factory=list, repr=False)
+    _current_tool:   dict | None    = field(default=None, repr=False)
+    _partial_parts:  list[str]      = field(default_factory=list, repr=False)
+
     def is_done(self) -> bool:
         return self.status in (AgentStatus.COMPLETED, AgentStatus.ERRORED, AgentStatus.SHUTDOWN)
 
     def elapsed_seconds(self) -> float:
         return time.time() - self.created_at
+
+    def progress_snapshot(self) -> dict:
+        """Return a thread-safe snapshot of current progress."""
+        with self._progress_lock:
+            current_tool = dict(self._current_tool) if self._current_tool else None
+            tool_count = len(self._tool_log)
+            last_tool = dict(self._tool_log[-1]) if self._tool_log else None
+            partial_text = "".join(self._partial_parts)
+
+        # Truncate partial text to last 2000 chars
+        if len(partial_text) > 2000:
+            partial_text = "..." + partial_text[-2000:]
+
+        # Truncate current tool arguments to 500 chars
+        if current_tool:
+            args_str = str(current_tool.get("arguments", ""))
+            if len(args_str) > 500:
+                current_tool["arguments"] = args_str[:500] + "..."
+
+        return {
+            "agent_id": self.agent_id,
+            "nickname": self.nickname,
+            "status": self.status.value,
+            "elapsed_seconds": round(self.elapsed_seconds(), 1),
+            "tool_iterations_completed": tool_count,
+            "current_tool": current_tool,
+            "last_completed_tool": last_tool,
+            "partial_output_tail": partial_text,
+        }
 
 
 # ── AgentManager ──────────────────────────────────────────────────────────────
@@ -294,6 +330,10 @@ class AgentManager:
             entry.status = AgentStatus.PENDING
             entry.result = None
             entry.error  = None
+            with entry._progress_lock:
+                entry._tool_log.clear()
+                entry._current_tool = None
+                entry._partial_parts.clear()
             from .config import Config as _Config
             cfg = entry.config.model_copy() if entry.config is not None else _Config()
             t = threading.Thread(
@@ -329,9 +369,12 @@ class AgentManager:
             remaining = max(0.0, deadline - time.time())
             finished = entry._done_event.wait(timeout=remaining)
             if not finished:
-                results[agent_id] = (
-                    f"[timeout] agent '{entry.nickname}' did not finish within {timeout}s"
-                )
+                snapshot = entry.progress_snapshot()
+                results[agent_id] = json.dumps({
+                    "status": "timeout",
+                    "message": f"agent '{entry.nickname}' did not finish within {timeout}s",
+                    "progress": snapshot,
+                }, ensure_ascii=False)
             elif entry.status == AgentStatus.ERRORED:
                 results[agent_id] = f"[error] {entry.error}"
             else:
@@ -402,6 +445,27 @@ class AgentManager:
                         break
                     if event.type == "text":
                         parts.append(event.data)
+                        with entry._progress_lock:
+                            entry._partial_parts.append(event.data)
+                    elif event.type == "tool_start":
+                        with entry._progress_lock:
+                            entry._current_tool = {
+                                "name": event.data["name"],
+                                "arguments": event.data.get("arguments", ""),
+                                "started_at": time.time(),
+                            }
+                    elif event.type == "tool_end":
+                        with entry._progress_lock:
+                            if entry._current_tool is not None:
+                                entry._tool_log.append({
+                                    "name": entry._current_tool["name"],
+                                    "arguments": entry._current_tool["arguments"],
+                                    "started_at": entry._current_tool["started_at"],
+                                    "duration_ms": round(
+                                        (time.time() - entry._current_tool["started_at"]) * 1000, 1
+                                    ),
+                                })
+                                entry._current_tool = None
 
                 entry.result = "".join(parts).strip()
                 entry.status = AgentStatus.COMPLETED
@@ -512,20 +576,40 @@ class AgentManager:
 
             parts: list[str] = []
 
-            for event in agent.run(prompt):
-                if entry._stop_flag.is_set():
-                    break
-                if event.type == "text":
-                    parts.append(event.data)
-
-            # Drain any queued inputs
-            while not entry._input_queue.empty() and not entry._stop_flag.is_set():
-                msg = entry._input_queue.get_nowait()
-                for event in agent.run(msg):
+            def _process_events(event_stream):
+                for event in event_stream:
                     if entry._stop_flag.is_set():
                         break
                     if event.type == "text":
                         parts.append(event.data)
+                        with entry._progress_lock:
+                            entry._partial_parts.append(event.data)
+                    elif event.type == "tool_start":
+                        with entry._progress_lock:
+                            entry._current_tool = {
+                                "name": event.data["name"],
+                                "arguments": event.data.get("arguments", ""),
+                                "started_at": time.time(),
+                            }
+                    elif event.type == "tool_end":
+                        with entry._progress_lock:
+                            if entry._current_tool is not None:
+                                entry._tool_log.append({
+                                    "name": entry._current_tool["name"],
+                                    "arguments": entry._current_tool["arguments"],
+                                    "started_at": entry._current_tool["started_at"],
+                                    "duration_ms": round(
+                                        (time.time() - entry._current_tool["started_at"]) * 1000, 1
+                                    ),
+                                })
+                                entry._current_tool = None
+
+            _process_events(agent.run(prompt))
+
+            # Drain any queued inputs
+            while not entry._input_queue.empty() and not entry._stop_flag.is_set():
+                msg = entry._input_queue.get_nowait()
+                _process_events(agent.run(msg))
 
             entry.result = "".join(parts).strip()
             if entry.status != AgentStatus.SHUTDOWN:

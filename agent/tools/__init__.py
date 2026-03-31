@@ -1,5 +1,6 @@
 from .base import Tool, ToolRegistry
 from .multi_agents import (
+    CheckAgentTool,
     CloseAgentTool,
     ListAgentsTool,
     ResumeAgentTool,
@@ -145,6 +146,7 @@ __all__ = [
     "CloseAgentTool",
     "ResumeAgentTool",
     "ListAgentsTool",
+    "CheckAgentTool",
 ]
 
 

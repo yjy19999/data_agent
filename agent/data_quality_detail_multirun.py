@@ -484,6 +484,49 @@ class DataQualityDetailRunner(DataQualityRunner):
 
 
 # ---------------------------------------------------------------------------
+# Main-agent intro for multi-runner (replaces _DETAIL_QUALITY_INTRO_PROMPT)
+# ---------------------------------------------------------------------------
+
+_MULTI_MAIN_AGENT_INTRO_PROMPT = """\
+You are now in Phase 2: Quality Assessment (multi-agent mode).
+
+## Your role as the MAIN agent
+
+In this run, **each JSONL record is inspected by a dedicated sub-agent**.
+You will NOT receive individual JSONL records directly.
+
+Your responsibilities are:
+- Receive file-boundary announcements (--- NEW FILE ---) and acknowledge them.
+- Receive periodic consolidation prompts to write `ObservationSummary.json`.
+- Inspect **JSON files** directly — those blocks are delivered to you as messages.
+- Produce the final `QualityReport.json`, `QualityReport.md`, and `GateDecision.md`
+  after all sub-agents have finished.
+
+## What you WILL see
+
+- `--- NEW FILE ---` messages announcing JSONL or JSON file boundaries.
+- For JSON files: raw file content split into consecutive blocks.
+- Consolidation prompts asking you to aggregate per-record observations.
+- A final aggregation prompt directing you to read `BlockObservations.md` and
+  `ObservationLog.jsonl` to produce the final report.
+
+## What you will NOT see
+
+Individual JSONL records. Sub-agents handle those and write their observations
+to `BlockObservations.md` and `ObservationLog.jsonl` — you will read those files
+during the final aggregation step.
+
+## For JSON files (delivered to you directly)
+
+When you receive JSON file blocks, write factual observations about the content
+(fields, structure, anomalies, safety, fitness) and call WriteScore at the end
+of the last block.
+
+Do NOT call ReadData, ReadFormat, or similar tools to re-read files that are
+already being delivered to you.
+"""
+
+
 # Per-record seed prompt (injected into each fresh sub-agent before its record)
 # ---------------------------------------------------------------------------
 
@@ -795,11 +838,37 @@ class DataQualityDetailMultiRunner(DataQualityDetailRunner):
             timeout=600,
         )
 
+        obs_md = log_path.parent / "BlockObservations.md"
         for lineno, aid in agent_ids:
-            observation = results.get(aid, "(no result)")
+            raw = results.get(aid, "(no result)")
             block_source = f"{filename} record {lineno}/{total} [parallel]"
+
+            # Detect the new timeout JSON from enhanced wait(); write a clear
+            # sentinel so the aggregation agent knows this record was not inspected.
+            try:
+                parsed = json.loads(raw) if isinstance(raw, str) else None
+                if isinstance(parsed, dict) and parsed.get("status") == "timeout":
+                    progress = parsed.get("progress", {})
+                    tools_done = progress.get("tool_iterations_completed", 0)
+                    current = (progress.get("current_tool") or {}).get("name", "unknown")
+                    observation = (
+                        f"[TIMEOUT] Sub-agent for record {lineno} did not finish "
+                        f"within the time limit. "
+                        f"Tools completed: {tools_done}. "
+                        f"Last active tool: {current}. "
+                        f"This record's observation is INCOMPLETE — exclude from scoring."
+                    )
+                    yield TurnEvent(
+                        type="progress",
+                        data=f"[{filename}] record {lineno}/{total} TIMED OUT "
+                             f"(tools_done={tools_done}, last_tool={current})",
+                    )
+                else:
+                    observation = raw
+            except (json.JSONDecodeError, TypeError):
+                observation = raw
+
             _append_observation(log_path, lineno, block_source, observation)
-            obs_md = log_path.parent / "BlockObservations.md"
             with obs_md.open("a", encoding="utf-8") as fh:
                 fh.write(f"\n## block {lineno}  [{block_source}]\n{observation}\n")
 
@@ -837,8 +906,11 @@ class DataQualityDetailMultiRunner(DataQualityDetailRunner):
             shutil.rmtree(score_out)
         score_out.mkdir(parents=True, exist_ok=True)
 
-        # Intro turn on the main agent (same as DataQualityDetailRunner)
-        yield from agent.run(_DETAIL_QUALITY_INTRO_PROMPT)
+        # Intro turn on the main agent — uses multi-runner-specific prompt
+        # (the parent class's _DETAIL_QUALITY_INTRO_PROMPT is for single-agent
+        # mode where the main agent receives every record directly; here JSONL
+        # records go to sub-agents, so the main agent needs a different briefing)
+        yield from agent.run(_MULTI_MAIN_AGENT_INTRO_PROMPT)
 
         # Load schema context ONCE — injected into every sub-agent
         schema_context = self._load_schema_context()

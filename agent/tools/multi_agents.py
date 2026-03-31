@@ -300,3 +300,40 @@ class ListAgentsTool(Tool):
 
     def run(self) -> str:
         return _mgr().summary()
+
+
+# ── check_agent ──────────────────────────────────────────────────────────────
+
+class CheckAgentTool(Tool):
+    name = "check_agent"
+    description = (
+        "Check a running agent's current progress without blocking. "
+        "Returns the agent's status, what tool it is currently executing, "
+        "how many tool iterations it has completed, partial text output so far, "
+        "and elapsed time. Useful after a wait_for_agents timeout to decide "
+        "whether to extend the wait or close the agent."
+    )
+
+    @property
+    def parameters_schema(self):
+        return {
+            "type": "object",
+            "properties": {
+                "agent_id": {
+                    "type": "string",
+                    "description": "The agent_id or nickname of the agent to check.",
+                },
+            },
+            "required": ["agent_id"],
+        }
+
+    def run(self, agent_id: str) -> str:
+        """
+        Args:
+            agent_id: The agent_id or nickname of the agent to check.
+        """
+        entry = _mgr().get_entry(agent_id)
+        if entry is None:
+            return f"[error] agent '{agent_id}' not found"
+        snapshot = entry.progress_snapshot()
+        return json.dumps(snapshot, indent=2, ensure_ascii=False)

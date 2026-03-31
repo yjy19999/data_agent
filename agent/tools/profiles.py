@@ -93,6 +93,7 @@ from .opencode import (
     OpencodeWriteTool,
 )
 from .multi_agents import (
+    CheckAgentTool,
     CloseAgentTool,
     ListAgentsTool,
     ResumeAgentTool,
@@ -155,6 +156,7 @@ _PROFILES: dict[str, ToolProfile] = {
             # Multi-agent tools
             SpawnAgentTool, SendInputTool, WaitTool,
             CloseAgentTool, ResumeAgentTool, ListAgentsTool,
+            CheckAgentTool,
         ],
     ),
 
@@ -295,6 +297,7 @@ _PROFILES: dict[str, ToolProfile] = {
             # Multi-agent (shared with claude/opencode)
             SpawnAgentTool, SendInputTool, WaitTool,
             CloseAgentTool, ResumeAgentTool, ListAgentsTool,
+            CheckAgentTool,
         ],
     ),
 
@@ -340,6 +343,7 @@ _PROFILES: dict[str, ToolProfile] = {
             # Multi-agent tools
             SpawnAgentTool, SendInputTool, WaitTool,
             CloseAgentTool, ResumeAgentTool, ListAgentsTool,
+            CheckAgentTool,
         ],
     ),
 }
