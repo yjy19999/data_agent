@@ -305,8 +305,9 @@ _PROFILES: dict[str, ToolProfile] = {
     "datacheck": ToolProfile(
         name="datacheck",
         description=(
-            "Data quality check — Claude-style file tools without notebook or web. "
-            "Bash, Glob, Grep, LS, Read, Edit, Write."
+            "Data quality check — Claude-style file tools plus multi-agent tools. "
+            "Bash, Glob, Grep, LS, Read, Edit, Write, data inspection tools, "
+            "and spawn_agent/wait_for_agents/check_agent for parallel record inspection."
         ),
         _factories=[
             BashTool, _ClaudeGlob, _ClaudeGrep, LSTool,
@@ -314,6 +315,10 @@ _PROFILES: dict[str, ToolProfile] = {
             ReadFormatTool, ReadDataTool,
             ReadBlockMemoryTool, ReadBlockSummaryTool,
             WriteScoreTool,
+            # Multi-agent tools: used by DataQualityDetailMultiRunner
+            SpawnAgentTool, SendInputTool, WaitTool,
+            CloseAgentTool, ResumeAgentTool, ListAgentsTool,
+            CheckAgentTool,
         ],
     ),
 
